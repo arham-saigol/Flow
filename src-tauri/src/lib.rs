@@ -21,6 +21,8 @@ use tauri::{
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 
+const TRAY_ID: &str = "flow-tray";
+
 pub struct AppState {
     pub database: Database,
     pub recorder: AudioRecorder,
@@ -90,22 +92,49 @@ fn save_settings(
     settings: SettingsData,
     api_key: Option<String>,
 ) -> Result<()> {
-    if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
-        credentials::save_api_key(&api_key)?;
-    }
-    state.database.save_settings(&settings)?;
-    platform::configure_keybind(&settings.keybind);
+    let previous = state.database.settings(credentials::has_api_key())?;
     let autostart = app.autolaunch();
-    if settings.launch_at_startup {
+    if previous.launch_at_startup != settings.launch_at_startup {
+        set_autostart(&autostart, settings.launch_at_startup)?;
+    }
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| FlowError::Message("The system tray icon is unavailable.".into()))?;
+    let tooltip = format!("Flow — {} to dictate", settings.keybind);
+    if let Err(error) = tray.set_tooltip(Some(&tooltip)) {
+        let _ = set_autostart(&autostart, previous.launch_at_startup);
+        return Err(FlowError::Message(format!(
+            "Could not update the system tray: {error}"
+        )));
+    }
+    let save_result = (|| {
+        if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+            credentials::save_api_key(&api_key)?;
+        }
+        state.database.save_settings(&settings)
+    })();
+    if let Err(error) = save_result {
+        let _ = set_autostart(&autostart, previous.launch_at_startup);
+        let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
+        return Err(error);
+    }
+    platform::configure_keybind(&settings.keybind);
+    Ok(())
+}
+
+fn set_autostart(
+    autostart: &tauri_plugin_autostart::AutoLaunchManager,
+    enabled: bool,
+) -> Result<()> {
+    if enabled {
         autostart.enable().map_err(|error| {
             FlowError::Message(format!("Could not enable launch at startup: {error}"))
-        })?;
+        })
     } else {
         autostart.disable().map_err(|error| {
             FlowError::Message(format!("Could not disable launch at startup: {error}"))
-        })?;
+        })
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -147,15 +176,18 @@ pub(crate) fn show_main(app: &AppHandle) {
     }
 }
 
-fn create_tray(app: &tauri::App) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn create_tray(
+    app: &tauri::App,
+    keybind: &str,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let show = MenuItem::with_id(app, "show", "Open Flow", true, None::<&str>)?;
     let dictate = MenuItem::with_id(app, "dictate", "Start dictating", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Flow", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &dictate, &quit])?;
-    let mut builder = TrayIconBuilder::new()
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("Flow — Right Alt to dictate")
+        .tooltip(format!("Flow — {keybind} to dictate"))
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main(app),
             "dictate" => {
@@ -206,7 +238,7 @@ pub fn run() {
                 busy: AtomicBool::new(false),
             });
 
-            create_tray(app)?;
+            create_tray(app, &settings.keybind)?;
             platform::install_keyboard_hook(app.handle().clone())?;
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {

@@ -2,7 +2,7 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        OnceLock,
+        mpsc, OnceLock,
     },
     thread,
     time::Duration,
@@ -90,22 +90,37 @@ pub fn set_recording(recording: bool) {
 pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
     APP.set(app)
         .map_err(|_| FlowError::Windows("The keyboard handler was already initialized.".into()))?;
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("flow-keyboard-hook".into())
         .spawn(move || unsafe {
             let module = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            let hook =
-                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), HINSTANCE(module.0), 0);
-            let Ok(hook) = hook else {
-                eprintln!("Flow could not install the Windows keyboard hook");
-                return;
+            let hook = match SetWindowsHookExW(
+                WH_KEYBOARD_LL,
+                Some(keyboard_hook),
+                HINSTANCE(module.0),
+                0,
+            ) {
+                Ok(hook) => hook,
+                Err(error) => {
+                    let _ = ready_sender.send(Err(format!(
+                        "Could not install the keyboard handler: {error}"
+                    )));
+                    return;
+                }
             };
+            if ready_sender.send(Ok(())).is_err() {
+                return;
+            }
             message_loop(hook);
         })
         .map_err(|error| {
             FlowError::Windows(format!("Could not start the keyboard handler: {error}"))
         })?;
-    Ok(())
+    ready_receiver
+        .recv()
+        .map_err(|_| FlowError::Windows("The keyboard handler did not start.".into()))?
+        .map_err(FlowError::Windows)
 }
 
 unsafe fn message_loop(_hook: HHOOK) {

@@ -9,10 +9,12 @@ function SnippetRow({
   snippet,
   onChange,
   onDelete,
+  notify,
 }: {
   snippet: Snippet;
   onChange: (snippet: Snippet) => void;
   onDelete: () => void;
+  notify: (data: ToastData) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [trigger, setTrigger] = useState(snippet.trigger);
@@ -20,9 +22,13 @@ function SnippetRow({
 
   const save = async () => {
     if (!trigger.trim() || !content.trim()) return;
-    await api.updateSnippet(snippet.id, trigger.trim(), content);
-    onChange({ ...snippet, trigger: trigger.trim(), content });
-    setEditing(false);
+    try {
+      await api.updateSnippet(snippet.id, trigger.trim(), content);
+      onChange({ ...snippet, trigger: trigger.trim(), content });
+      setEditing(false);
+    } catch (error) {
+      notify({ kind: "error", message: String(error) });
+    }
   };
 
   return (
@@ -111,6 +117,7 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
             <SnippetRow
               key={snippet.id}
               snippet={snippet}
+              notify={notify}
               onChange={(next) => setSnippets((current) => current.map((item) => item.id === next.id ? next : item))}
               onDelete={() => {
                 void api.deleteSnippet(snippet.id).then(() => {
