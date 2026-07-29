@@ -30,8 +30,8 @@ use windows::{
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
                 SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
-                KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-                WM_SYSKEYUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -134,6 +134,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
     }
     let event = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+    if event.flags.contains(LLKHF_INJECTED) {
+        return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+    }
     let vk = event.vkCode;
     let message = wparam.0 as u32;
     let key_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
@@ -159,8 +162,22 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     let selected_key = SELECTED_KEY.load(Ordering::Acquire);
+    let mut replayed_chord = false;
     if vk != selected_key && key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
-        SELECTED_KEY_CHORDED.store(true, Ordering::Release);
+        let was_chorded = SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel);
+        if !was_chorded && matches!(selected_key, 0x77..=0x7B) {
+            match replay_chord(selected_key as u16, vk as u16) {
+                Ok(()) => replayed_chord = true,
+                Err(error) => {
+                    if let Some(app) = APP.get() {
+                        report_input_error(app.clone(), error);
+                    }
+                }
+            }
+        }
+    }
+    if replayed_chord {
+        return LRESULT(1);
     }
 
     if vk == selected_key {
@@ -185,7 +202,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
         }
-        if matches!(selected_key, 0x77..=0x7B | 0xA3..=0xA5) || chorded {
+        if matches!(selected_key, 0xA3..=0xA5) || chorded {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);
@@ -427,6 +444,19 @@ unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+unsafe fn replay_chord(selected_key: u16, chord_key: u16) -> Result<()> {
+    send_inputs(&[
+        key_input(selected_key, 0, KEYBD_EVENT_FLAGS(0)),
+        key_input(chord_key, 0, KEYBD_EVENT_FLAGS(0)),
+    ])
+}
+
+fn report_input_error(app: AppHandle, error: FlowError) {
+    tauri::async_runtime::spawn(async move {
+        crate::workflow::report_error(&app, error);
+    });
 }
 
 fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {

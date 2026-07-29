@@ -81,8 +81,8 @@ impl Database {
             .optional()?)
     }
 
-    fn put_setting(&self, key: &str, value: &str) -> Result<()> {
-        self.conn()?.execute(
+    fn put_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+        conn.execute(
             "INSERT INTO settings(key, value) VALUES(?1, ?2)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, value],
@@ -116,10 +116,13 @@ impl Database {
     }
 
     pub fn save_settings(&self, settings: &SettingsData) -> Result<()> {
-        self.put_setting("microphone_id", &settings.microphone_id)?;
-        self.put_setting("microphone_name", &settings.microphone_name)?;
-        self.put_setting("keybind", &settings.keybind)?;
-        self.put_setting(
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction()?;
+        Self::put_setting(&transaction, "microphone_id", &settings.microphone_id)?;
+        Self::put_setting(&transaction, "microphone_name", &settings.microphone_name)?;
+        Self::put_setting(&transaction, "keybind", &settings.keybind)?;
+        Self::put_setting(
+            &transaction,
             "launch_at_startup",
             if settings.launch_at_startup {
                 "true"
@@ -127,8 +130,13 @@ impl Database {
                 "false"
             },
         )?;
-        self.put_setting("history_retention", &settings.history_retention)?;
-        self.put_setting(
+        Self::put_setting(
+            &transaction,
+            "history_retention",
+            &settings.history_retention,
+        )?;
+        Self::put_setting(
+            &transaction,
             "automatic_language",
             if settings.automatic_language {
                 "true"
@@ -136,17 +144,18 @@ impl Database {
                 "false"
             },
         )?;
-        self.prune_history(&settings.history_retention)
+        if let Some(seconds) = retention_seconds(&settings.history_retention) {
+            transaction.execute(
+                "DELETE FROM history WHERE created_at < ?1",
+                [Self::now() - seconds],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn prune_history(&self, retention: &str) -> Result<()> {
-        let seconds = match retention {
-            "24 hours" => Some(86_400),
-            "7 days" => Some(7 * 86_400),
-            "30 days" => Some(30 * 86_400),
-            _ => None,
-        };
-        if let Some(seconds) = seconds {
+        if let Some(seconds) = retention_seconds(retention) {
             self.conn()?.execute(
                 "DELETE FROM history WHERE created_at < ?1",
                 [Self::now() - seconds],
@@ -334,6 +343,15 @@ impl Database {
         self.conn()?
             .execute("DELETE FROM snippets WHERE id = ?1", [id])?;
         Ok(())
+    }
+}
+
+fn retention_seconds(retention: &str) -> Option<i64> {
+    match retention {
+        "24 hours" => Some(86_400),
+        "7 days" => Some(7 * 86_400),
+        "30 days" => Some(30 * 86_400),
+        _ => None,
     }
 }
 
