@@ -156,7 +156,9 @@ pub fn cancel(app: &AppHandle) {
 pub fn report_error(app: &AppHandle, error: FlowError) {
     platform::set_recording(false);
     let state = app.state::<AppState>();
-    state.busy.store(false, Ordering::Release);
+    if !state.processing.load(Ordering::Acquire) {
+        state.busy.store(false, Ordering::Release);
+    }
     let message = friendly_error(error);
     if platform::prepare_overlay(app, platform::capture_target()).is_err() {
         crate::show_main(app);

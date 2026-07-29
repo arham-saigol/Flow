@@ -27,10 +27,11 @@ use windows::{
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
                 SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
-                KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
-                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEHWHEEL,
-                WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+                WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+                WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, XBUTTON1,
             },
         },
     },
@@ -45,6 +46,7 @@ static SELECTED_KEY_CHORDED: AtomicBool = AtomicBool::new(false);
 static SELECTED_KEY_SCAN: AtomicU32 = AtomicU32::new(0);
 static SELECTED_KEY_EXTENDED: AtomicBool = AtomicBool::new(false);
 static KEYS_DOWN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+static MOUSE_BUTTONS_DOWN: AtomicU32 = AtomicU32::new(0);
 static LAST_LEFT_CTRL_DOWN: AtomicU32 = AtomicU32::new(0);
 static LAST_TARGET: Mutex<Option<TargetWindow>> = Mutex::new(None);
 static RECORDING: AtomicBool = AtomicBool::new(false);
@@ -167,31 +169,60 @@ unsafe fn message_loop(_keyboard_hook: HHOOK, _mouse_hook: HHOOK) {
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code >= 0
-        && matches!(
-            wparam.0 as u32,
+    if code >= 0 {
+        let message = wparam.0 as u32;
+        if let Some((button, is_down)) = mouse_button_state(message, lparam) {
+            if is_down {
+                MOUSE_BUTTONS_DOWN.fetch_or(button, Ordering::AcqRel);
+            } else {
+                MOUSE_BUTTONS_DOWN.fetch_and(!button, Ordering::AcqRel);
+            }
+        }
+        if matches!(
+            message,
             WM_LBUTTONDOWN
                 | WM_RBUTTONDOWN
                 | WM_MBUTTONDOWN
                 | WM_XBUTTONDOWN
                 | WM_MOUSEWHEEL
                 | WM_MOUSEHWHEEL
-        )
-        && SELECTED_KEY_DOWN.load(Ordering::Acquire)
-        && !SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel)
-    {
-        let selected_key = SELECTED_KEY.load(Ordering::Acquire);
-        if let Err(error) = replay_key_down(
-            selected_key as u16,
-            SELECTED_KEY_SCAN.load(Ordering::Acquire) as u16,
-            SELECTED_KEY_EXTENDED.load(Ordering::Acquire),
-        ) {
-            if let Some(app) = APP.get() {
-                report_input_error(app.clone(), error);
+        ) && SELECTED_KEY_DOWN.load(Ordering::Acquire)
+            && !SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel)
+        {
+            let selected_key = SELECTED_KEY.load(Ordering::Acquire);
+            if let Err(error) = replay_key_down(
+                selected_key as u16,
+                SELECTED_KEY_SCAN.load(Ordering::Acquire) as u16,
+                SELECTED_KEY_EXTENDED.load(Ordering::Acquire),
+            ) {
+                if let Some(app) = APP.get() {
+                    report_input_error(app.clone(), error);
+                }
             }
         }
     }
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+}
+
+unsafe fn mouse_button_state(message: u32, lparam: LPARAM) -> Option<(u32, bool)> {
+    match message {
+        WM_LBUTTONDOWN => Some((1, true)),
+        WM_LBUTTONUP => Some((1, false)),
+        WM_RBUTTONDOWN => Some((2, true)),
+        WM_RBUTTONUP => Some((2, false)),
+        WM_MBUTTONDOWN => Some((4, true)),
+        WM_MBUTTONUP => Some((4, false)),
+        WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            let event = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            let button = if (event.mouseData >> 16) as u16 == XBUTTON1 {
+                8
+            } else {
+                16
+            };
+            Some((button, message == WM_XBUTTONDOWN))
+        }
+        _ => None,
+    }
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -278,7 +309,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     key != selected_key as usize
                         && !(synthetic_altgr_ctrl && key == 0xA2)
                         && state.load(Ordering::Acquire)
-                });
+                }) || MOUSE_BUTTONS_DOWN.load(Ordering::Acquire) != 0;
                 SELECTED_KEY_CHORDED.store(chorded, Ordering::Release);
             }
         } else if key_up {
