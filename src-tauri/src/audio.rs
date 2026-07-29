@@ -257,7 +257,7 @@ fn begin_recording(
             emit_counter,
             channels,
             threshold,
-            |sample| (sample as f32 / u8::MAX as f32) * 2.0 - 1.0,
+            u8_to_f32,
             error_sender,
         )?,
         SampleFormat::U16 => build_stream::<u16>(
@@ -331,6 +331,10 @@ fn finish_recording(recording: ActiveRecording) -> Result<CapturedAudio> {
         duration_ms,
         target: recording.target,
     })
+}
+
+fn u8_to_f32(sample: u8) -> f32 {
+    (sample as f32 - 128.0) / 128.0
 }
 
 fn has_audible_signal(samples: &[f32], sample_rate: u32) -> bool {
@@ -527,7 +531,12 @@ pub fn list_microphones() -> Result<Vec<Microphone>> {
 
 #[cfg(test)]
 mod tests {
-    use super::has_audible_signal;
+    use super::{has_audible_signal, u8_to_f32};
+
+    #[test]
+    fn unsigned_8_bit_silence_is_centered() {
+        assert_eq!(u8_to_f32(128), 0.0);
+    }
 
     #[test]
     fn silence_is_not_audible() {
