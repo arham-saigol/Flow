@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   BookOpen,
@@ -27,10 +27,17 @@ export default function App() {
   const [toast, setToast] = useState<ToastData | null>(null);
   const [dashboardVersion, setDashboardVersion] = useState(0);
   const [keybind, setKeybind] = useState("Right Alt");
+  const toastTimer = useRef<number | null>(null);
 
   const notify = useCallback((data: ToastData) => {
+    if (toastTimer.current !== null) {
+      window.clearTimeout(toastTimer.current);
+    }
     setToast(data);
-    window.setTimeout(() => setToast(null), 3500);
+    toastTimer.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimer.current = null;
+    }, 3500);
   }, []);
 
   useEffect(() => {
@@ -48,6 +55,9 @@ export default function App() {
     return () => {
       void unlisten.then((fn) => fn());
       void unlistenError.then((fn) => fn());
+      if (toastTimer.current !== null) {
+        window.clearTimeout(toastTimer.current);
+      }
     };
   }, [notify]);
 

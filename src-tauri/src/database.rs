@@ -280,13 +280,18 @@ impl Database {
 
     pub fn add_snippet(&self, trigger: &str, content: &str) -> Result<Snippet> {
         let trigger = trigger.trim();
-        if trigger.is_empty() || content.trim().is_empty() {
+        if crate::workflow::normalize_utterance(trigger).is_empty() || content.trim().is_empty() {
             return Err(FlowError::Message(
                 "A snippet needs both a trigger and content.".into(),
             ));
         }
         let now = Self::now();
         let conn = self.conn()?;
+        if normalized_trigger_exists(&conn, trigger, None)? {
+            return Err(FlowError::Message(
+                "That snippet trigger already exists.".into(),
+            ));
+        }
         conn.execute(
             "INSERT INTO snippets(trigger, content, created_at) VALUES(?1, ?2, ?3)",
             params![trigger, content, now],
@@ -306,9 +311,21 @@ impl Database {
     }
 
     pub fn update_snippet(&self, id: i64, trigger: &str, content: &str) -> Result<()> {
-        self.conn()?.execute(
+        let trigger = trigger.trim();
+        if crate::workflow::normalize_utterance(trigger).is_empty() || content.trim().is_empty() {
+            return Err(FlowError::Message(
+                "A snippet needs both a trigger and content.".into(),
+            ));
+        }
+        let conn = self.conn()?;
+        if normalized_trigger_exists(&conn, trigger, Some(id))? {
+            return Err(FlowError::Message(
+                "That snippet trigger already exists.".into(),
+            ));
+        }
+        conn.execute(
             "UPDATE snippets SET trigger = ?1, content = ?2 WHERE id = ?3",
-            params![trigger.trim(), content, id],
+            params![trigger, content, id],
         )?;
         Ok(())
     }
@@ -318,4 +335,21 @@ impl Database {
             .execute("DELETE FROM snippets WHERE id = ?1", [id])?;
         Ok(())
     }
+}
+
+fn normalized_trigger_exists(
+    conn: &Connection,
+    trigger: &str,
+    excluded_id: Option<i64>,
+) -> Result<bool> {
+    let normalized = crate::workflow::normalize_utterance(trigger);
+    let mut statement = conn.prepare("SELECT id, trigger FROM snippets")?;
+    let triggers = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(triggers.into_iter().any(|(id, existing)| {
+        Some(id) != excluded_id && crate::workflow::normalize_utterance(&existing) == normalized
+    }))
 }

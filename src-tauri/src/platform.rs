@@ -252,6 +252,14 @@ pub fn copy_text(text: &str) -> Result<()> {
     unsafe { write_clipboard_text(text) }
 }
 
+fn clipboard_owner() -> Result<HWND> {
+    APP.get()
+        .and_then(|app| app.get_webview_window("main"))
+        .and_then(|window| window.hwnd().ok())
+        .map(|handle| HWND(handle.0 as *mut _))
+        .ok_or_else(|| FlowError::Windows("The clipboard owner window is unavailable.".into()))
+}
+
 enum ClipboardSnapshot {
     Safe(Option<String>),
     PreserveUntouched,
@@ -303,7 +311,7 @@ unsafe fn snapshot_text_clipboard() -> ClipboardSnapshot {
 
 unsafe fn write_clipboard_text(text: &str) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    OpenClipboard(HWND::default())
+    OpenClipboard(clipboard_owner()?)
         .map_err(|error| FlowError::Windows(format!("Could not open the clipboard: {error}")))?;
     if let Err(error) = EmptyClipboard() {
         let _ = CloseClipboard();
@@ -335,7 +343,7 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
 }
 
 unsafe fn clear_clipboard() -> Result<()> {
-    OpenClipboard(HWND::default())
+    OpenClipboard(clipboard_owner()?)
         .map_err(|error| FlowError::Windows(format!("Could not restore the clipboard: {error}")))?;
     let result = EmptyClipboard()
         .map_err(|error| FlowError::Windows(format!("Could not restore the clipboard: {error}")));
