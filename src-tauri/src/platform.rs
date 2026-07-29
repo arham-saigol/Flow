@@ -474,10 +474,7 @@ unsafe fn send_unicode(text: &str) -> Result<()> {
             }
         }
     }
-    for chunk in inputs.chunks(64) {
-        send_inputs(chunk)?;
-    }
-    Ok(())
+    send_inputs(&inputs)
 }
 
 unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
