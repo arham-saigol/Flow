@@ -239,6 +239,10 @@ textarea { resize: vertical; line-height: 1.5; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* The overlay window itself is transparent and never takes focus. */
+html:has(.overlay-bar) {
+  min-width: 0;
+  background: transparent;
+}
 body:has(.overlay-bar) {
   min-width: 0;
   display: grid;
