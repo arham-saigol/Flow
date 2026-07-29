@@ -108,13 +108,28 @@ fn save_settings(
             "Could not update the system tray: {error}"
         )));
     }
-    let save_result = (|| {
-        if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
-            credentials::save_api_key(&api_key)?;
+    let api_key = api_key.filter(|key| !key.trim().is_empty());
+    let previous_api_key = api_key
+        .as_ref()
+        .and_then(|_| credentials::read_api_key().ok());
+    if let Some(api_key) = api_key.as_ref() {
+        if let Err(error) = credentials::save_api_key(api_key) {
+            let _ = set_autostart(&autostart, previous.launch_at_startup);
+            let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
+            return Err(error);
         }
-        state.database.save_settings(&settings)
-    })();
-    if let Err(error) = save_result {
+    }
+    if let Err(error) = state.database.save_settings(&settings) {
+        if api_key.is_some() {
+            match previous_api_key {
+                Some(previous_key) => {
+                    let _ = credentials::save_api_key(&previous_key);
+                }
+                None => {
+                    let _ = credentials::delete_api_key();
+                }
+            }
+        }
         let _ = set_autostart(&autostart, previous.launch_at_startup);
         let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
         return Err(error);
@@ -194,21 +209,25 @@ fn create_tray(
             "dictate" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    workflow::toggle(&app).await;
+                    workflow::toggle_from_tray(&app).await;
                 });
             }
             "quit" => app.exit(0),
             _ => {}
         })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
+        .on_tray_icon_event(|tray, event| match event {
+            TrayIconEvent::Click {
+                button_state: MouseButtonState::Down,
+                ..
+            } => platform::remember_target(),
+            TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            } => {
                 show_main(tray.app_handle());
             }
+            _ => {}
         });
     if let Some(icon) = app.default_window_icon() {
         builder = builder.icon(icon.clone());

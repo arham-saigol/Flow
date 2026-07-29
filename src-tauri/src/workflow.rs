@@ -13,17 +13,29 @@ use crate::{
 static ERROR_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub async fn toggle(app: &AppHandle) {
+    toggle_with_target(app, platform::remembered_target()).await;
+}
+
+pub async fn toggle_from_tray(app: &AppHandle) {
+    toggle_with_target(app, platform::remembered_target()).await;
+}
+
+async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.recorder.is_recording() {
         stop_and_process(app).await;
     } else if !state.busy.load(Ordering::Acquire) {
-        if let Err(error) = start(app) {
+        if let Err(error) = start_with_target(app, target) {
             report_error(app, error);
         }
     }
 }
 
 pub fn start(app: &AppHandle) -> Result<()> {
+    start_with_target(app, None)
+}
+
+fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
     let state = app.state::<AppState>();
     if state.busy.swap(true, Ordering::AcqRel) {
         return Err(FlowError::AlreadyRecording);
@@ -35,7 +47,7 @@ pub fn start(app: &AppHandle) -> Result<()> {
             return Err(FlowError::MissingApiKey);
         }
         let settings = state.database.settings(true)?;
-        let target = platform::capture_target();
+        let target = target.unwrap_or_else(platform::capture_target);
         platform::prepare_overlay(app, target)?;
         state
             .recorder

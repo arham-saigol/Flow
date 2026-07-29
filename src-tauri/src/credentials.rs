@@ -1,7 +1,8 @@
 use windows::{
     core::{PCWSTR, PWSTR},
     Win32::Security::Credentials::{
-        CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_PERSIST_LOCAL_MACHINE,
+        CRED_TYPE_GENERIC,
     },
 };
 
@@ -65,6 +66,15 @@ pub fn save_api_key(api_key: &str) -> Result<()> {
     unsafe {
         CredWriteW(&credential, 0).map_err(|error| {
             FlowError::Windows(format!("Could not save the API key securely: {error}"))
+        })
+    }
+}
+
+pub fn delete_api_key() -> Result<()> {
+    let target = wide(TARGET);
+    unsafe {
+        CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0).map_err(|error| {
+            FlowError::Windows(format!("Could not restore the saved API key: {error}"))
         })
     }
 }

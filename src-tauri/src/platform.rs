@@ -2,7 +2,7 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc, OnceLock,
+        mpsc, Mutex, OnceLock,
     },
     thread,
     time::Duration,
@@ -41,6 +41,8 @@ static SELECTED_KEY: AtomicU32 = AtomicU32::new(0xA5); // VK_RMENU
 static SELECTED_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 static SELECTED_KEY_CHORDED: AtomicBool = AtomicBool::new(false);
 static KEYS_DOWN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+static LAST_LEFT_CTRL_DOWN: AtomicU32 = AtomicU32::new(0);
+static LAST_TARGET: Mutex<Option<TargetWindow>> = Mutex::new(None);
 static RECORDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
@@ -63,6 +65,30 @@ pub fn capture_target() -> TargetWindow {
             cursor_y: point.y,
         }
     }
+}
+
+pub fn remember_target() {
+    let target = capture_target();
+    if target.hwnd == 0 || is_flow_window(target.hwnd) {
+        return;
+    }
+    if let Ok(mut remembered) = LAST_TARGET.lock() {
+        *remembered = Some(target);
+    }
+}
+
+pub fn remembered_target() -> Option<TargetWindow> {
+    LAST_TARGET.lock().ok().and_then(|target| *target)
+}
+
+fn is_flow_window(hwnd: isize) -> bool {
+    APP.get().is_some_and(|app| {
+        ["main", "overlay"].iter().any(|label| {
+            app.get_webview_window(label)
+                .and_then(|window| window.hwnd().ok())
+                .is_some_and(|handle| handle.0 as isize == hwnd)
+        })
+    })
 }
 
 pub fn configure_keybind(keybind: &str) {
@@ -138,6 +164,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     let message = wparam.0 as u32;
     let key_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let key_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if vk == 0xA2 && key_down {
+        LAST_LEFT_CTRL_DOWN.store(event.time, Ordering::Release);
+    }
     if let Some(state) = KEYS_DOWN.get(vk as usize) {
         if key_down {
             state.store(true, Ordering::Release);
@@ -159,10 +188,13 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     let selected_key = SELECTED_KEY.load(Ordering::Acquire);
+    if vk == selected_key && key_down {
+        remember_target();
+    }
     let mut replayed_chord = false;
     if vk != selected_key && key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
         let was_chorded = SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel);
-        if !was_chorded && matches!(selected_key, 0x77..=0x7B) {
+        if !was_chorded {
             match replay_chord(selected_key as u16, vk as u16) {
                 Ok(()) => replayed_chord = true,
                 Err(error) => {
@@ -182,8 +214,15 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         if key_down {
             // Repeated key-down messages never toggle. A complete physical press toggles on key-up.
             if !SELECTED_KEY_DOWN.swap(true, Ordering::AcqRel) {
+                let synthetic_altgr_ctrl = selected_key == 0xA5
+                    && event
+                        .time
+                        .wrapping_sub(LAST_LEFT_CTRL_DOWN.load(Ordering::Acquire))
+                        <= 10;
                 chorded = KEYS_DOWN.iter().enumerate().any(|(key, state)| {
-                    key != selected_key as usize && state.load(Ordering::Acquire)
+                    key != selected_key as usize
+                        && !(synthetic_altgr_ctrl && key == 0xA2)
+                        && state.load(Ordering::Acquire)
                 });
                 SELECTED_KEY_CHORDED.store(chorded, Ordering::Release);
             }
@@ -199,7 +238,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
         }
-        if matches!(selected_key, 0xA3..=0xA5) || chorded {
+        if chorded {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);
