@@ -343,9 +343,9 @@ pub fn prepare_overlay(app: &AppHandle, target: TargetWindow) -> Result<()> {
         .ok_or_else(|| FlowError::Windows("The target monitor is unavailable.".into()))?;
     let work_area = monitor.work_area();
     let scale = monitor.scale_factor();
-    let width = (148.0 * scale).round() as i32;
-    let height = (56.0 * scale).round() as i32;
-    let bottom_margin = (28.0 * scale).round() as i32;
+    let width = (104.0 * scale).round() as i32;
+    let height = (50.0 * scale).round() as i32;
+    let bottom_margin = (8.0 * scale).round() as i32;
     let x = work_area.position.x + (work_area.size.width as i32 - width) / 2;
     let y = work_area.position.y + work_area.size.height as i32 - height - bottom_margin;
     overlay

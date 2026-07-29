@@ -77,7 +77,7 @@ pub async fn stop_and_process(app: &AppHandle) {
             return;
         }
     };
-    emit_overlay(app, "analysing", Some("Analysing"));
+    emit_overlay(app, "analysing", Some("Analyzing"));
 
     let result = async {
         let api_key = credentials::read_api_key()?;
@@ -106,6 +106,8 @@ pub async fn stop_and_process(app: &AppHandle) {
             state.groq.clean(&api_key, &transcript, &dictionary).await?
         };
 
+        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
+        tokio_sleep(std::time::Duration::from_millis(150)).await;
         platform::paste_text(recording.target, &final_text)?;
         let history_result = state
             .database

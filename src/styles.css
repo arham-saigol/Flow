@@ -252,12 +252,14 @@ body:has(.overlay-bar) #root {
   place-items: center;
 }
 .overlay-bar {
-  width: 132px;
-  height: 40px;
-  padding: 0 16px;
+  width: 92px;
+  height: 38px;
+  padding: 0 7px;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   color: #f8f7f4;
   background: #191918;
   border: 1px solid rgba(248, 247, 244, .36);
@@ -265,7 +267,7 @@ body:has(.overlay-bar) #root {
   box-shadow: none;
 }
 .waveform {
-  height: 24px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -284,26 +286,73 @@ body:has(.overlay-bar) #root {
     height 42ms linear,
     opacity 70ms ease-out;
 }
+.processing-indicator {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
 .shimmer-label {
   position: relative;
-  overflow: hidden;
-  color: #d8d5d0;
-  font-size: 12px;
-  font-weight: 500;
-  letter-spacing: .015em;
+  z-index: 1;
+  display: block;
+  transform: translateY(-.5px);
+  color: transparent;
+  background: linear-gradient(
+    100deg,
+    #aaa8a3 22%,
+    #f8f7f4 45%,
+    #f8f7f4 55%,
+    #aaa8a3 78%
+  );
+  background-size: 220% 100%;
+  background-position: 120% 0;
+  background-clip: text;
+  -webkit-background-clip: text;
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 16px;
+  letter-spacing: -.01em;
+  animation: text-shimmer 1.7s ease-in-out infinite;
 }
-.shimmer-label::after { content: ""; position: absolute; inset: 0; transform: translateX(-110%); background: linear-gradient(100deg, transparent 12%, rgba(255,255,255,.9) 50%, transparent 88%); mix-blend-mode: overlay; animation: shimmer 1.15s linear infinite; }
-@keyframes shimmer { to { transform: translateX(110%); } }
+@keyframes text-shimmer {
+  0% { background-position: 120% 0; }
+  70%, 100% { background-position: -120% 0; }
+}
+.processing-progress {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  pointer-events: none;
+}
+.processing-progress__fill {
+  width: 100%;
+  height: 100%;
+  border-right: 1px solid rgba(248, 247, 244, .2);
+  background: rgba(248, 247, 244, .045);
+  transition: transform 130ms cubic-bezier(.2, .75, .35, 1);
+  will-change: transform;
+}
 .overlay-error {
-  max-width: 126px;
+  max-width: 100px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   text-align: center;
   color: #e4e1dc;
-  font-size: 10px;
+  font-size: 11px;
+}
+.overlay-bar--analysing,
+.overlay-bar--thinking {
+  background: #1d1d1b;
 }
 .overlay-bar--error { border-color: rgba(248, 247, 244, .56); }
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-label { animation: none; color: #dedcd7; background: none; }
+  .processing-progress__fill { transition: none; }
+}
 
 @media (max-width: 920px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }

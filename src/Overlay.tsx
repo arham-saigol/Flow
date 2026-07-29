@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import * as Progress from "@radix-ui/react-progress";
 
 type Phase = "recording" | "analysing" | "thinking" | "error";
 
@@ -11,11 +12,31 @@ interface OverlayState {
 export default function Overlay() {
   const [state, setState] = useState<OverlayState>({ phase: "recording" });
   const [level, setLevel] = useState(0);
+  const [progress, setProgress] = useState(0);
   const targetLevel = useRef(0);
   const displayedLevel = useRef(0);
+  const processingStartedAt = useRef<number | null>(null);
+  const processingComplete = useRef(false);
 
   useEffect(() => {
-    const stateListener = listen<OverlayState>("overlay-state", (event) => setState(event.payload));
+    const stateListener = listen<OverlayState>("overlay-state", (event) => {
+      const nextState = event.payload;
+      setState(nextState);
+
+      if (nextState.phase === "analysing") {
+        processingStartedAt.current = performance.now();
+        processingComplete.current = false;
+        setProgress(0);
+      } else if (nextState.phase === "recording" || nextState.phase === "error") {
+        processingStartedAt.current = null;
+        processingComplete.current = false;
+        setProgress(0);
+      }
+    });
+    const completionListener = listen("overlay-progress-complete", () => {
+      processingComplete.current = true;
+      setProgress(100);
+    });
     const waveListener = listen<{ level: number }>("waveform", (event) => {
       const rawLevel = Math.max(0, Math.min(1, event.payload.level));
       targetLevel.current = rawLevel < 0.012
@@ -31,6 +52,21 @@ export default function Overlay() {
         displayedLevel.current = targetLevel.current;
       }
       setLevel(displayedLevel.current);
+
+      if (processingStartedAt.current !== null && !processingComplete.current) {
+        const elapsed = performance.now() - processingStartedAt.current;
+        const fastPhaseDuration = 650;
+
+        if (elapsed <= fastPhaseDuration) {
+          const fastPhase = elapsed / fastPhaseDuration;
+          const easedFastPhase = 1 - Math.pow(1 - fastPhase, 3);
+          setProgress(70 * easedFastPhase);
+        } else {
+          const slowPhaseElapsed = elapsed - fastPhaseDuration;
+          setProgress(70 + 25 * (1 - Math.exp(-slowPhaseElapsed / 2200)));
+        }
+      }
+
       animationFrame = window.requestAnimationFrame(animate);
     };
     animationFrame = window.requestAnimationFrame(animate);
@@ -38,6 +74,7 @@ export default function Overlay() {
     return () => {
       window.cancelAnimationFrame(animationFrame);
       void stateListener.then((fn) => fn());
+      void completionListener.then((fn) => fn());
       void waveListener.then((fn) => fn());
     };
   }, []);
@@ -58,9 +95,23 @@ export default function Overlay() {
             />
           ))}
         </div>
+      ) : state.phase === "error" ? (
+        <div className="overlay-error">{state.message}</div>
       ) : (
-        <div className={state.phase === "error" ? "overlay-error" : "shimmer-label"}>
-          {state.message ?? (state.phase === "analysing" ? "Analysing" : "Thinking")}
+        <div className="processing-indicator">
+          <span className="shimmer-label">
+            {state.message ?? (state.phase === "analysing" ? "Analyzing" : "Thinking")}
+          </span>
+          <Progress.Root
+            className="processing-progress"
+            value={progress}
+            aria-label="Preparing transcription"
+          >
+            <Progress.Indicator
+              className="processing-progress__fill"
+              style={{ transform: `translateX(-${100 - progress}%)` }}
+            />
+          </Progress.Root>
         </div>
       )}
     </div>
