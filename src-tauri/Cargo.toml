@@ -26,6 +26,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 cpal = "0.15"
 hound = "3.5"
+unicode_categories = "0.1"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Globalization",

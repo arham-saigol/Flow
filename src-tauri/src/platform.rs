@@ -12,7 +12,7 @@ use tauri::{AppHandle, Manager};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
         System::{
             DataExchange::{
@@ -349,18 +349,18 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     OpenClipboard(clipboard_owner()?)
         .map_err(|error| FlowError::Windows(format!("Could not open the clipboard: {error}")))?;
-    if let Err(error) = EmptyClipboard() {
-        let _ = CloseClipboard();
-        return Err(FlowError::Windows(format!(
-            "Could not clear the clipboard: {error}"
-        )));
-    }
-    let allocation =
-        GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>()).map_err(|error| {
-            FlowError::Windows(format!("Could not allocate clipboard memory: {error}"))
-        })?;
+    let allocation = match GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>()) {
+        Ok(allocation) => allocation,
+        Err(error) => {
+            let _ = CloseClipboard();
+            return Err(FlowError::Windows(format!(
+                "Could not allocate clipboard memory: {error}"
+            )));
+        }
+    };
     let pointer = GlobalLock(allocation).cast::<u16>();
     if pointer.is_null() {
+        let _ = GlobalFree(allocation);
         let _ = CloseClipboard();
         return Err(FlowError::Windows(
             "Could not access clipboard memory.".into(),
@@ -368,7 +368,15 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
     }
     std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
     let _ = GlobalUnlock(allocation);
+    if let Err(error) = EmptyClipboard() {
+        let _ = GlobalFree(allocation);
+        let _ = CloseClipboard();
+        return Err(FlowError::Windows(format!(
+            "Could not clear the clipboard: {error}"
+        )));
+    }
     if let Err(error) = SetClipboardData(13, windows::Win32::Foundation::HANDLE(allocation.0)) {
+        let _ = GlobalFree(allocation);
         let _ = CloseClipboard();
         return Err(FlowError::Windows(format!(
             "Could not write to the clipboard: {error}"

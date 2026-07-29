@@ -120,9 +120,12 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
               notify={notify}
               onChange={(next) => setSnippets((current) => current.map((item) => item.id === next.id ? next : item))}
               onDelete={() => {
-                void api.deleteSnippet(snippet.id).then(() => {
-                  setSnippets((current) => current.filter((item) => item.id !== snippet.id));
-                });
+                void api
+                  .deleteSnippet(snippet.id)
+                  .then(() => {
+                    setSnippets((current) => current.filter((item) => item.id !== snippet.id));
+                  })
+                  .catch((error) => notify({ kind: "error", message: String(error) }));
               }}
             />
           ))

@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{AppHandle, Emitter, Manager};
+use unicode_categories::UnicodeCategories;
 
 use crate::{
     credentials,
@@ -174,9 +175,7 @@ fn hide_overlay(app: &AppHandle) {
 pub(crate) fn normalize_utterance(value: &str) -> String {
     value
         .trim()
-        .trim_matches(|character: char| {
-            character.is_ascii_punctuation() || character.is_whitespace()
-        })
+        .trim_matches(|character: char| character.is_punctuation() || character.is_whitespace())
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

@@ -58,6 +58,10 @@ enum RecorderCommand {
     Cancel {
         reply: mpsc::SyncSender<Result<()>>,
     },
+    StreamFailed {
+        app: AppHandle,
+        message: String,
+    },
 }
 
 impl AudioRecorder {
@@ -65,9 +69,10 @@ impl AudioRecorder {
         let (sender, receiver) = mpsc::channel();
         let recording = Arc::new(AtomicBool::new(false));
         let worker_recording = recording.clone();
+        let error_sender = sender.clone();
         std::thread::Builder::new()
             .name("flow-audio".into())
-            .spawn(move || recorder_worker(receiver, worker_recording))
+            .spawn(move || recorder_worker(receiver, worker_recording, error_sender))
             .expect("could not start Flow audio worker");
         Self { sender, recording }
     }
@@ -112,7 +117,11 @@ impl AudioRecorder {
     }
 }
 
-fn recorder_worker(receiver: mpsc::Receiver<RecorderCommand>, recording_flag: Arc<AtomicBool>) {
+fn recorder_worker(
+    receiver: mpsc::Receiver<RecorderCommand>,
+    recording_flag: Arc<AtomicBool>,
+    error_sender: mpsc::Sender<RecorderCommand>,
+) {
     let mut active: Option<ActiveRecording> = None;
     while let Ok(command) = receiver.recv() {
         match command {
@@ -125,10 +134,12 @@ fn recorder_worker(receiver: mpsc::Receiver<RecorderCommand>, recording_flag: Ar
                 let result = if active.is_some() {
                     Err(FlowError::AlreadyRecording)
                 } else {
-                    begin_recording(app, &microphone_id, target).map(|recording| {
-                        active = Some(recording);
-                        recording_flag.store(true, Ordering::Release);
-                    })
+                    begin_recording(app, &microphone_id, target, error_sender.clone()).map(
+                        |recording| {
+                            active = Some(recording);
+                            recording_flag.store(true, Ordering::Release);
+                        },
+                    )
                 };
                 let _ = reply.send(result);
             }
@@ -149,6 +160,12 @@ fn recorder_worker(receiver: mpsc::Receiver<RecorderCommand>, recording_flag: Ar
                 recording_flag.store(false, Ordering::Release);
                 let _ = reply.send(result);
             }
+            RecorderCommand::StreamFailed { app, message } => {
+                if active.take().is_some() {
+                    recording_flag.store(false, Ordering::Release);
+                    crate::workflow::report_error(&app, FlowError::Audio(message));
+                }
+            }
         }
     }
 }
@@ -157,6 +174,7 @@ fn begin_recording(
     app: AppHandle,
     microphone_id: &str,
     target: TargetWindow,
+    error_sender: mpsc::Sender<RecorderCommand>,
 ) -> Result<ActiveRecording> {
     let host = cpal::default_host();
     let device = select_device(&host, microphone_id)?;
@@ -181,6 +199,7 @@ fn begin_recording(
             channels,
             threshold,
             |sample| sample,
+            error_sender,
         )?,
         SampleFormat::I16 => build_stream::<i16>(
             &device,
@@ -191,6 +210,7 @@ fn begin_recording(
             channels,
             threshold,
             |sample| sample as f32 / i16::MAX as f32,
+            error_sender,
         )?,
         SampleFormat::U16 => build_stream::<u16>(
             &device,
@@ -201,6 +221,7 @@ fn begin_recording(
             channels,
             threshold,
             |sample| (sample as f32 / u16::MAX as f32) * 2.0 - 1.0,
+            error_sender,
         )?,
         format => {
             return Err(FlowError::Audio(format!(
@@ -279,10 +300,12 @@ fn build_stream<T>(
     channels: usize,
     threshold: usize,
     convert: fn(T) -> f32,
+    error_sender: mpsc::Sender<RecorderCommand>,
 ) -> Result<Stream>
 where
     T: cpal::SizedSample + Copy + Send + 'static,
 {
+    let error_app = app.clone();
     device
         .build_input_stream(
             config,
@@ -306,7 +329,10 @@ where
                 }
             },
             move |error| {
-                eprintln!("Flow microphone stream error: {error}");
+                let _ = error_sender.send(RecorderCommand::StreamFailed {
+                    app: error_app.clone(),
+                    message: format!("The microphone stream stopped: {error}"),
+                });
             },
             Some(Duration::from_millis(80)),
         )

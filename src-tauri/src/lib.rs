@@ -288,6 +288,7 @@ mod tests {
             workflow::normalize_utterance("  My   EMAIL address... "),
             "my email address"
         );
+        assert_eq!(workflow::normalize_utterance("。状态؟"), "状态");
     }
 
     #[test]
