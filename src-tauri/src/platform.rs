@@ -27,10 +27,10 @@ use windows::{
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
                 SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
-                KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEWHEEL,
-                WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW,
+                KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_MOUSEHWHEEL,
+                WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -42,6 +42,8 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 static SELECTED_KEY: AtomicU32 = AtomicU32::new(0xA5); // VK_RMENU
 static SELECTED_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 static SELECTED_KEY_CHORDED: AtomicBool = AtomicBool::new(false);
+static SELECTED_KEY_SCAN: AtomicU32 = AtomicU32::new(0);
+static SELECTED_KEY_EXTENDED: AtomicBool = AtomicBool::new(false);
 static KEYS_DOWN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 static LAST_LEFT_CTRL_DOWN: AtomicU32 = AtomicU32::new(0);
 static LAST_TARGET: Mutex<Option<TargetWindow>> = Mutex::new(None);
@@ -179,7 +181,11 @@ unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) 
         && !SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel)
     {
         let selected_key = SELECTED_KEY.load(Ordering::Acquire);
-        if let Err(error) = replay_key_down(selected_key as u16) {
+        if let Err(error) = replay_key_down(
+            selected_key as u16,
+            SELECTED_KEY_SCAN.load(Ordering::Acquire) as u16,
+            SELECTED_KEY_EXTENDED.load(Ordering::Acquire),
+        ) {
             if let Some(app) = APP.get() {
                 report_input_error(app.clone(), error);
             }
@@ -212,7 +218,10 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     if vk == VK_ESCAPE.0 as u32 && RECORDING.load(Ordering::Acquire) {
-        if message == WM_KEYDOWN {
+        if key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
+            SELECTED_KEY_CHORDED.store(true, Ordering::Release);
+        }
+        if key_down {
             if let Some(app) = APP.get() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -231,7 +240,14 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     if vk != selected_key && key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
         let was_chorded = SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel);
         if !was_chorded {
-            match replay_chord(selected_key as u16, vk as u16) {
+            match replay_chord(
+                selected_key as u16,
+                SELECTED_KEY_SCAN.load(Ordering::Acquire) as u16,
+                SELECTED_KEY_EXTENDED.load(Ordering::Acquire),
+                vk as u16,
+                event.scanCode as u16,
+                event.flags.contains(LLKHF_EXTENDED),
+            ) {
                 Ok(()) => replayed_chord = true,
                 Err(error) => {
                     if let Some(app) = APP.get() {
@@ -250,6 +266,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         if key_down {
             // Repeated key-down messages never toggle. A complete physical press toggles on key-up.
             if !SELECTED_KEY_DOWN.swap(true, Ordering::AcqRel) {
+                SELECTED_KEY_SCAN.store(event.scanCode, Ordering::Release);
+                SELECTED_KEY_EXTENDED
+                    .store(event.flags.contains(LLKHF_EXTENDED), Ordering::Release);
                 let synthetic_altgr_ctrl = selected_key == 0xA5
                     && event
                         .time
@@ -447,15 +466,34 @@ unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
     Ok(())
 }
 
-unsafe fn replay_chord(selected_key: u16, chord_key: u16) -> Result<()> {
+unsafe fn replay_chord(
+    selected_key: u16,
+    selected_scan: u16,
+    selected_extended: bool,
+    chord_key: u16,
+    chord_scan: u16,
+    chord_extended: bool,
+) -> Result<()> {
     send_inputs(&[
-        key_input(selected_key, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(chord_key, 0, KEYBD_EVENT_FLAGS(0)),
+        key_input(
+            selected_key,
+            selected_scan,
+            extended_key_flag(selected_extended),
+        ),
+        key_input(chord_key, chord_scan, extended_key_flag(chord_extended)),
     ])
 }
 
-unsafe fn replay_key_down(key: u16) -> Result<()> {
-    send_inputs(&[key_input(key, 0, KEYBD_EVENT_FLAGS(0))])
+unsafe fn replay_key_down(key: u16, scan: u16, extended: bool) -> Result<()> {
+    send_inputs(&[key_input(key, scan, extended_key_flag(extended))])
+}
+
+fn extended_key_flag(extended: bool) -> KEYBD_EVENT_FLAGS {
+    if extended {
+        windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_EXTENDEDKEY
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    }
 }
 
 fn report_input_error(app: AppHandle, error: FlowError) {
