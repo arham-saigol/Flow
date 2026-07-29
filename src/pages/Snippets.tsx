@@ -31,6 +31,12 @@ function SnippetRow({
     }
   };
 
+  const cancel = () => {
+    setTrigger(snippet.trigger);
+    setContent(snippet.content);
+    setEditing(false);
+  };
+
   return (
     <article className="snippet-row">
       {editing ? (
@@ -48,7 +54,7 @@ function SnippetRow({
         {editing ? (
           <>
             <button className="icon-button" aria-label="Save" onClick={() => void save()}><Check size={16} /></button>
-            <button className="icon-button" aria-label="Cancel" onClick={() => setEditing(false)}><X size={16} /></button>
+            <button className="icon-button" aria-label="Cancel" onClick={cancel}><X size={16} /></button>
           </>
         ) : (
           <>

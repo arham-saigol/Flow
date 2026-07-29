@@ -12,20 +12,17 @@ use tauri::{AppHandle, Manager};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{GlobalFree, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
         System::{
-            DataExchange::{
-                CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
-                OpenClipboard, SetClipboardData,
-            },
+            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
         },
         UI::{
             Input::KeyboardAndMouse::{
                 SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-                KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL, VK_ESCAPE,
+                KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_ESCAPE,
             },
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
@@ -279,25 +276,7 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
             ));
         }
 
-        match snapshot_text_clipboard() {
-            ClipboardSnapshot::Safe(previous) => {
-                if write_clipboard_text(text).is_ok() {
-                    let paste_result = send_paste();
-                    if paste_result.is_ok() {
-                        // Give the target message queue time to read before restoring ownership.
-                        thread::sleep(Duration::from_millis(110));
-                    }
-                    match previous {
-                        Some(value) => write_clipboard_text(&value)?,
-                        None => clear_clipboard()?,
-                    }
-                    paste_result?;
-                } else {
-                    send_unicode(text)?;
-                }
-            }
-            ClipboardSnapshot::PreserveUntouched => send_unicode(text)?,
-        }
+        send_unicode(text)?;
     }
     Ok(())
 }
@@ -312,55 +291,6 @@ fn clipboard_owner() -> Result<HWND> {
         .and_then(|window| window.hwnd().ok())
         .map(|handle| HWND(handle.0 as *mut _))
         .ok_or_else(|| FlowError::Windows("The clipboard owner window is unavailable.".into()))
-}
-
-enum ClipboardSnapshot {
-    Safe(Option<String>),
-    PreserveUntouched,
-}
-
-unsafe fn snapshot_text_clipboard() -> ClipboardSnapshot {
-    if OpenClipboard(HWND::default()).is_err() {
-        return ClipboardSnapshot::PreserveUntouched;
-    }
-    let mut format = 0_u32;
-    let mut has_unicode = false;
-    let mut has_other = false;
-    loop {
-        format = EnumClipboardFormats(format);
-        if format == 0 {
-            break;
-        }
-        if format == 13 {
-            has_unicode = true;
-        } else {
-            has_other = true;
-        }
-    }
-    if has_other {
-        let _ = CloseClipboard();
-        return ClipboardSnapshot::PreserveUntouched;
-    }
-    let value = if has_unicode {
-        GetClipboardData(13).ok().and_then(|handle| {
-            let pointer = GlobalLock(HGLOBAL(handle.0));
-            if pointer.is_null() {
-                return None;
-            }
-            let wide = pointer.cast::<u16>();
-            let mut length = 0;
-            while *wide.add(length) != 0 {
-                length += 1;
-            }
-            let value = String::from_utf16(std::slice::from_raw_parts(wide, length)).ok();
-            let _ = GlobalUnlock(HGLOBAL(handle.0));
-            value
-        })
-    } else {
-        None
-    };
-    let _ = CloseClipboard();
-    ClipboardSnapshot::Safe(value)
 }
 
 unsafe fn write_clipboard_text(text: &str) -> Result<()> {
@@ -402,25 +332,6 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
     }
     let _ = CloseClipboard();
     Ok(())
-}
-
-unsafe fn clear_clipboard() -> Result<()> {
-    OpenClipboard(clipboard_owner()?)
-        .map_err(|error| FlowError::Windows(format!("Could not restore the clipboard: {error}")))?;
-    let result = EmptyClipboard()
-        .map_err(|error| FlowError::Windows(format!("Could not restore the clipboard: {error}")));
-    let _ = CloseClipboard();
-    result
-}
-
-unsafe fn send_paste() -> Result<()> {
-    let inputs = [
-        key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(b'V' as u16, 0, KEYBD_EVENT_FLAGS(0)),
-        key_input(b'V' as u16, 0, KEYEVENTF_KEYUP),
-        key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
-    ];
-    send_inputs(&inputs)
 }
 
 unsafe fn send_unicode(text: &str) -> Result<()> {
