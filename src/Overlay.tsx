@@ -13,6 +13,8 @@ export default function Overlay() {
   const [state, setState] = useState<OverlayState>({ phase: "recording" });
   const [level, setLevel] = useState(0);
   const [progress, setProgress] = useState(0);
+  const [appearanceKey, setAppearanceKey] = useState(0);
+  const [isClosing, setIsClosing] = useState(false);
   const targetLevel = useRef(0);
   const displayedLevel = useRef(0);
   const processingStartedAt = useRef<number | null>(null);
@@ -28,10 +30,15 @@ export default function Overlay() {
         processingComplete.current = false;
         setProgress(0);
       } else if (nextState.phase === "recording" || nextState.phase === "error") {
+        setIsClosing(false);
+        setAppearanceKey((current) => current + 1);
         processingStartedAt.current = null;
         processingComplete.current = false;
         setProgress(0);
       }
+    });
+    const dismissalListener = listen("overlay-dismiss", () => {
+      setIsClosing(true);
     });
     const completionListener = listen("overlay-progress-complete", () => {
       processingComplete.current = true;
@@ -74,6 +81,7 @@ export default function Overlay() {
     return () => {
       window.cancelAnimationFrame(animationFrame);
       void stateListener.then((fn) => fn());
+      void dismissalListener.then((fn) => fn());
       void completionListener.then((fn) => fn());
       void waveListener.then((fn) => fn());
     };
@@ -84,7 +92,10 @@ export default function Overlay() {
     state.message ?? (state.phase === "analysing" ? "Analyzing" : "Thinking");
 
   return (
-    <div className={`overlay-bar overlay-bar--${state.phase}`}>
+    <div
+      key={appearanceKey}
+      className={`overlay-bar overlay-bar--${state.phase}${isClosing ? " overlay-bar--closing" : ""}`}
+    >
       {state.phase === "recording" ? (
         <div className="waveform" aria-label="Recording. Press Escape to cancel.">
           {waveformProfile.map((weight, index) => (

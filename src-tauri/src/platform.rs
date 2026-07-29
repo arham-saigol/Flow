@@ -346,7 +346,9 @@ pub fn prepare_overlay(app: &AppHandle, target: TargetWindow) -> Result<()> {
     let width = (104.0 * scale).round() as i32;
     let height = (50.0 * scale).round() as i32;
     let bottom_margin = (8.0 * scale).round() as i32;
-    let x = work_area.position.x + (work_area.size.width as i32 - width) / 2;
+    // Bias an unavoidable half-pixel to the right instead of leaving the
+    // overlay looking one physical pixel left of center.
+    let x = work_area.position.x + (work_area.size.width as i32 - width + 1) / 2;
     let y = work_area.position.y + work_area.size.height as i32 - height - bottom_margin;
     overlay
         .set_position(tauri::PhysicalPosition::new(x, y))
