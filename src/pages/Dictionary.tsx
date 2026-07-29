@@ -71,6 +71,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
             <EditableRow
               key={entry.id}
               value={entry.value}
+              onError={(error) => notify({ kind: "error", message: String(error) })}
               onSave={async (next) => {
                 await api.updateDictionary(entry.id, next);
                 setEntries((current) =>

@@ -43,6 +43,7 @@ static APP: OnceLock<AppHandle> = OnceLock::new();
 static SELECTED_KEY: AtomicU32 = AtomicU32::new(0xA5); // VK_RMENU
 static SELECTED_KEY_DOWN: AtomicBool = AtomicBool::new(false);
 static SELECTED_KEY_CHORDED: AtomicBool = AtomicBool::new(false);
+static KEYS_DOWN: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 static RECORDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
@@ -135,6 +136,15 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     let event = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
     let vk = event.vkCode;
     let message = wparam.0 as u32;
+    let key_down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+    let key_up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if let Some(state) = KEYS_DOWN.get(vk as usize) {
+        if key_down {
+            state.store(true, Ordering::Release);
+        } else if key_up {
+            state.store(false, Ordering::Release);
+        }
+    }
 
     if vk == VK_ESCAPE.0 as u32 && RECORDING.load(Ordering::Acquire) {
         if message == WM_KEYDOWN {
@@ -149,31 +159,33 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     let selected_key = SELECTED_KEY.load(Ordering::Acquire);
-    if vk != selected_key
-        && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
-        && SELECTED_KEY_DOWN.load(Ordering::Acquire)
-    {
+    if vk != selected_key && key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
         SELECTED_KEY_CHORDED.store(true, Ordering::Release);
     }
 
     if vk == selected_key {
-        if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
+        let mut chorded = SELECTED_KEY_CHORDED.load(Ordering::Acquire);
+        if key_down {
             // Repeated key-down messages never toggle. A complete physical press toggles on key-up.
             if !SELECTED_KEY_DOWN.swap(true, Ordering::AcqRel) {
-                SELECTED_KEY_CHORDED.store(false, Ordering::Release);
-            }
-        } else if (message == WM_KEYUP || message == WM_SYSKEYUP)
-            && SELECTED_KEY_DOWN.swap(false, Ordering::AcqRel)
-            && !SELECTED_KEY_CHORDED.swap(false, Ordering::AcqRel)
-        {
-            if let Some(app) = APP.get() {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    crate::workflow::toggle(&app).await;
+                chorded = KEYS_DOWN.iter().enumerate().any(|(key, state)| {
+                    key != selected_key as usize && state.load(Ordering::Acquire)
                 });
+                SELECTED_KEY_CHORDED.store(chorded, Ordering::Release);
+            }
+        } else if key_up {
+            let was_down = SELECTED_KEY_DOWN.swap(false, Ordering::AcqRel);
+            chorded = SELECTED_KEY_CHORDED.swap(false, Ordering::AcqRel);
+            if was_down && !chorded {
+                if let Some(app) = APP.get() {
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::workflow::toggle(&app).await;
+                    });
+                }
             }
         }
-        if matches!(selected_key, 0xA3..=0xA5) {
+        if matches!(selected_key, 0xA3..=0xA5) || chorded {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);
@@ -238,8 +250,17 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
                 "The application you started dictating in is no longer open.".into(),
             ));
         }
-        let _ = SetForegroundWindow(target_hwnd);
+        if !SetForegroundWindow(target_hwnd).as_bool() {
+            return Err(FlowError::Windows(
+                "Flow could not return focus to the application where dictation started.".into(),
+            ));
+        }
         thread::sleep(Duration::from_millis(24));
+        if GetForegroundWindow().0 != target_hwnd.0 {
+            return Err(FlowError::Windows(
+                "The application where dictation started did not regain focus.".into(),
+            ));
+        }
 
         match snapshot_text_clipboard() {
             ClipboardSnapshot::Safe(previous) => {

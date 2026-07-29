@@ -5,10 +5,12 @@ export function EditableRow({
   value,
   onSave,
   onDelete,
+  onError,
 }: {
   value: string;
   onSave: (value: string) => Promise<void>;
   onDelete: () => Promise<void>;
+  onError: (error: unknown) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -16,8 +18,12 @@ export function EditableRow({
   const save = async () => {
     const next = draft.trim();
     if (!next) return;
-    await onSave(next);
-    setEditing(false);
+    try {
+      await onSave(next);
+      setEditing(false);
+    } catch (error) {
+      onError(error);
+    }
   };
 
   return (
@@ -60,7 +66,11 @@ export function EditableRow({
             <button className="icon-button" aria-label="Edit" onClick={() => setEditing(true)}>
               <Pencil size={15} />
             </button>
-            <button className="icon-button icon-button--danger" aria-label="Remove" onClick={() => void onDelete()}>
+            <button
+              className="icon-button icon-button--danger"
+              aria-label="Remove"
+              onClick={() => void onDelete().catch(onError)}
+            >
               <Trash2 size={15} />
             </button>
           </>
