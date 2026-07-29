@@ -13,7 +13,6 @@ use windows::{
     core::PCWSTR,
     Win32::{
         Foundation::{GlobalFree, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
-        Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
         System::{
             DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
             LibraryLoader::GetModuleHandleW,
@@ -336,26 +335,19 @@ pub fn prepare_overlay(app: &AppHandle, target: TargetWindow) -> Result<()> {
     let overlay = app
         .get_webview_window("overlay")
         .ok_or_else(|| FlowError::Windows("The dictation bar is unavailable.".into()))?;
-    let monitor = unsafe {
-        MonitorFromPoint(
-            POINT {
-                x: target.cursor_x,
-                y: target.cursor_y,
-            },
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    unsafe {
-        let _ = GetMonitorInfoW(monitor, &mut info);
-    }
-    let width = 190;
-    let height = 88;
-    let x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
-    let y = info.rcWork.bottom - height - 28;
+    let monitor = overlay
+        .monitor_from_point(target.cursor_x.into(), target.cursor_y.into())
+        .map_err(|error| {
+            FlowError::Windows(format!("Could not identify the target monitor: {error}"))
+        })?
+        .ok_or_else(|| FlowError::Windows("The target monitor is unavailable.".into()))?;
+    let work_area = monitor.work_area();
+    let scale = monitor.scale_factor();
+    let width = (190.0 * scale).round() as i32;
+    let height = (88.0 * scale).round() as i32;
+    let bottom_margin = (28.0 * scale).round() as i32;
+    let x = work_area.position.x + (work_area.size.width as i32 - width) / 2;
+    let y = work_area.position.y + work_area.size.height as i32 - height - bottom_margin;
     overlay
         .set_position(tauri::PhysicalPosition::new(x, y))
         .map_err(|error| {
