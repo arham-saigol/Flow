@@ -51,11 +51,15 @@ pub fn start(app: &AppHandle) -> Result<()> {
 }
 
 pub async fn stop_and_process(app: &AppHandle) {
-    platform::set_recording(false);
     let state = app.state::<AppState>();
+    if state.processing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    platform::set_recording(false);
     let recording = match state.recorder.stop() {
         Ok(recording) => recording,
         Err(error) => {
+            state.processing.store(false, Ordering::Release);
             state.busy.store(false, Ordering::Release);
             report_error(app, error);
             return;
@@ -104,7 +108,6 @@ pub async fn stop_and_process(app: &AppHandle) {
     }
     .await;
 
-    state.busy.store(false, Ordering::Release);
     match result {
         Ok(()) => {
             hide_overlay(app);
@@ -114,8 +117,13 @@ pub async fn stop_and_process(app: &AppHandle) {
                     message: "Dictation pasted".into(),
                 },
             );
+            state.processing.store(false, Ordering::Release);
+            state.busy.store(false, Ordering::Release);
         }
-        Err(error) => report_error(app, error),
+        Err(error) => {
+            state.processing.store(false, Ordering::Release);
+            report_error(app, error);
+        }
     }
 }
 

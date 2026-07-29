@@ -265,21 +265,22 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
         match snapshot_text_clipboard() {
             ClipboardSnapshot::Safe(previous) => {
                 if write_clipboard_text(text).is_ok() {
-                    send_paste();
-                    // Give the target message queue time to read before restoring ownership.
-                    thread::sleep(Duration::from_millis(110));
+                    let paste_result = send_paste();
+                    if paste_result.is_ok() {
+                        // Give the target message queue time to read before restoring ownership.
+                        thread::sleep(Duration::from_millis(110));
+                    }
                     match previous {
                         Some(value) => write_clipboard_text(&value)?,
                         None => clear_clipboard()?,
                     }
+                    paste_result?;
                 } else {
-                    send_unicode(text);
+                    send_unicode(text)?;
                 }
             }
-            ClipboardSnapshot::PreserveUntouched => send_unicode(text),
+            ClipboardSnapshot::PreserveUntouched => send_unicode(text)?,
         }
-        let _ =
-            windows::Win32::UI::WindowsAndMessaging::SetCursorPos(target.cursor_x, target.cursor_y);
     }
     Ok(())
 }
@@ -395,25 +396,37 @@ unsafe fn clear_clipboard() -> Result<()> {
     result
 }
 
-unsafe fn send_paste() {
+unsafe fn send_paste() -> Result<()> {
     let inputs = [
         key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
         key_input(b'V' as u16, 0, KEYBD_EVENT_FLAGS(0)),
         key_input(b'V' as u16, 0, KEYEVENTF_KEYUP),
         key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
     ];
-    let _ = SendInput(&inputs, size_of::<INPUT>() as i32);
+    send_inputs(&inputs)
 }
 
-unsafe fn send_unicode(text: &str) {
+unsafe fn send_unicode(text: &str) -> Result<()> {
     let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
     for unit in text.encode_utf16() {
         inputs.push(key_input(0, unit, KEYEVENTF_UNICODE));
         inputs.push(key_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
     }
     for chunk in inputs.chunks(64) {
-        let _ = SendInput(chunk, size_of::<INPUT>() as i32);
+        send_inputs(chunk)?;
     }
+    Ok(())
+}
+
+unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
+    let inserted = SendInput(inputs, size_of::<INPUT>() as i32) as usize;
+    if inserted != inputs.len() {
+        return Err(FlowError::Windows(format!(
+            "Windows accepted {inserted} of {} keyboard input events.",
+            inputs.len()
+        )));
+    }
+    Ok(())
 }
 
 fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {

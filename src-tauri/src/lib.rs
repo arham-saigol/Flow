@@ -28,6 +28,7 @@ pub struct AppState {
     pub recorder: AudioRecorder,
     pub groq: GroqClient,
     pub busy: AtomicBool,
+    pub processing: AtomicBool,
 }
 
 #[tauri::command]
@@ -236,6 +237,7 @@ pub fn run() {
                 recorder: AudioRecorder::new(),
                 groq,
                 busy: AtomicBool::new(false),
+                processing: AtomicBool::new(false),
             });
 
             create_tray(app, &settings.keybind)?;
