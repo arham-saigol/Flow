@@ -30,13 +30,19 @@ export function SettingsModal({
   const [testing, setTesting] = useState(false);
   const [tested, setTested] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
 
   useEffect(() => {
-    void Promise.all([api.settings(), api.microphones()])
-      .then(([next, devices]) => {
+    void api
+      .settings()
+      .then((next) => {
         setSettings(next);
-        setMicrophones(devices);
+        setSettingsLoaded(true);
       })
+      .catch((error) => notify({ kind: "error", message: String(error) }));
+    void api
+      .microphones()
+      .then(setMicrophones)
       .catch((error) => notify({ kind: "error", message: String(error) }));
   }, [notify]);
 
@@ -56,11 +62,12 @@ export function SettingsModal({
   };
 
   const save = async () => {
+    if (!settingsLoaded) return;
     setSaving(true);
     try {
       const selected = microphones.find((item) => item.id === settings.microphone_id);
       await api.saveSettings(
-        { ...settings, microphone_name: selected?.name ?? "System default" },
+        { ...settings, microphone_name: selected?.name ?? settings.microphone_name },
         apiKey || undefined,
       );
       notify({ kind: "success", message: "Settings saved" });
@@ -151,7 +158,7 @@ export function SettingsModal({
 
         <footer>
           <button className="secondary-button" onClick={onClose}>Cancel</button>
-          <button className="primary-button" disabled={saving} onClick={() => void save()}>
+          <button className="primary-button" disabled={!settingsLoaded || saving} onClick={() => void save()}>
             {saving && <LoaderCircle className="spin" size={16} />}
             {saving ? "Saving…" : "Save settings"}
           </button>

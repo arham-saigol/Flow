@@ -185,7 +185,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
         }
-        if matches!(selected_key, 0xA3..=0xA5) || chorded {
+        if matches!(selected_key, 0x77..=0x7B | 0xA3..=0xA5) || chorded {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);

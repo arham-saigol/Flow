@@ -52,9 +52,13 @@ export default function App() {
     const unlistenError = listen<{ message: string }>("flow-error", (event) => {
       notify({ kind: "error", message: event.payload.message });
     });
+    const unlistenWarning = listen<{ message: string }>("flow-warning", (event) => {
+      notify({ kind: "error", message: event.payload.message });
+    });
     return () => {
       void unlisten.then((fn) => fn());
       void unlistenError.then((fn) => fn());
+      void unlistenWarning.then((fn) => fn());
       if (toastTimer.current !== null) {
         window.clearTimeout(toastTimer.current);
       }

@@ -100,16 +100,16 @@ pub async fn stop_and_process(app: &AppHandle) {
         };
 
         platform::paste_text(recording.target, &final_text)?;
-        state
+        let history_result = state
             .database
-            .insert_history(&final_text, &transcript, recording.duration_ms)?;
-        state.database.prune_history(&settings.history_retention)?;
-        Ok::<_, FlowError>(())
+            .insert_history(&final_text, &transcript, recording.duration_ms)
+            .and_then(|_| state.database.prune_history(&settings.history_retention));
+        Ok::<_, FlowError>(history_result.err())
     }
     .await;
 
     match result {
-        Ok(()) => {
+        Ok(history_error) => {
             hide_overlay(app);
             let _ = app.emit(
                 "dictation-complete",
@@ -117,6 +117,16 @@ pub async fn stop_and_process(app: &AppHandle) {
                     message: "Dictation pasted".into(),
                 },
             );
+            if let Some(error) = history_error {
+                let _ = app.emit(
+                    "flow-warning",
+                    MessagePayload {
+                        message: format!(
+                            "Dictation pasted, but Flow could not update history: {error}"
+                        ),
+                    },
+                );
+            }
             state.processing.store(false, Ordering::Release);
             state.busy.store(false, Ordering::Release);
         }
