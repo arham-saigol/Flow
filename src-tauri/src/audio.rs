@@ -321,6 +321,9 @@ fn finish_recording(recording: ActiveRecording) -> Result<CapturedAudio> {
     if samples.len() < (recording.sample_rate / 8) as usize {
         return Err(FlowError::EmptyRecording);
     }
+    if !has_audible_signal(&samples, recording.sample_rate) {
+        return Err(FlowError::EmptyRecording);
+    }
     let mono_16k = resample(&samples, recording.sample_rate, 16_000);
     let wav = encode_wav(&mono_16k, 16_000);
     Ok(CapturedAudio {
@@ -328,6 +331,27 @@ fn finish_recording(recording: ActiveRecording) -> Result<CapturedAudio> {
         duration_ms,
         target: recording.target,
     })
+}
+
+fn has_audible_signal(samples: &[f32], sample_rate: u32) -> bool {
+    const RMS_THRESHOLD: f32 = 0.003;
+    const REQUIRED_WINDOWS: usize = 3;
+
+    let window_size = (sample_rate / 50).max(1) as usize;
+    let mut audible_windows = 0;
+    for window in samples.chunks(window_size) {
+        let mean_square =
+            window.iter().map(|sample| sample * sample).sum::<f32>() / window.len() as f32;
+        if mean_square.sqrt() >= RMS_THRESHOLD {
+            audible_windows += 1;
+            if audible_windows >= REQUIRED_WINDOWS {
+                return true;
+            }
+        } else {
+            audible_windows = 0;
+        }
+    }
+    false
 }
 
 fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
@@ -499,4 +523,28 @@ pub fn list_microphones() -> Result<Vec<Microphone>> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_audible_signal;
+
+    #[test]
+    fn silence_is_not_audible() {
+        assert!(!has_audible_signal(&vec![0.0; 16_000], 16_000));
+    }
+
+    #[test]
+    fn a_brief_click_is_not_audible() {
+        let mut samples = vec![0.0; 16_000];
+        samples[1_000] = 1.0;
+        assert!(!has_audible_signal(&samples, 16_000));
+    }
+
+    #[test]
+    fn sustained_audio_is_audible() {
+        let mut samples = vec![0.0; 16_000];
+        samples[1_000..2_280].fill(0.01);
+        assert!(has_audible_signal(&samples, 16_000));
+    }
 }

@@ -16,7 +16,10 @@ const empty: DashboardData = {
 const number = new Intl.NumberFormat();
 
 function formatDuration(ms: number) {
-  const totalMinutes = Math.round(ms / 60000);
+  if (ms <= 0) return "0s";
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.round(totalSeconds / 60);
   if (totalMinutes < 60) return `${totalMinutes}m`;
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
