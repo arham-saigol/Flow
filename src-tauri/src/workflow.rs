@@ -23,7 +23,7 @@ pub async fn toggle_from_tray(app: &AppHandle) {
 async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.recorder.is_recording() {
-        stop_and_process(app).await;
+        stop_and_process_with_target(app, target).await;
     } else if !state.busy.load(Ordering::Acquire) {
         if let Err(error) = start_with_target(app, target) {
             report_error(app, error);
@@ -63,6 +63,10 @@ fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) ->
 }
 
 pub async fn stop_and_process(app: &AppHandle) {
+    stop_and_process_with_target(app, Some(platform::capture_target())).await;
+}
+
+async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.processing.swap(true, Ordering::AcqRel) {
         return;
@@ -77,6 +81,9 @@ pub async fn stop_and_process(app: &AppHandle) {
             return;
         }
     };
+    // Capture the destination when dictation is stopped. Processing may take
+    // several seconds, during which the foreground window can change again.
+    let paste_target = target.unwrap_or(recording.target);
     emit_overlay(app, "analysing", Some("Analyzing"));
 
     let result = async {
@@ -108,7 +115,7 @@ pub async fn stop_and_process(app: &AppHandle) {
 
         let _ = app.emit_to("overlay", "overlay-progress-complete", ());
         tokio_sleep(std::time::Duration::from_millis(150)).await;
-        platform::paste_text(recording.target, &final_text)?;
+        platform::paste_text(paste_target, &final_text)?;
         let history_result = state
             .database
             .insert_history(&final_text, &transcript, recording.duration_ms)

@@ -2,8 +2,8 @@
 
 Flow is a lightweight Windows dictation app built with Tauri 2, React, TypeScript,
 Rust, and SQLite. Press Right Alt to record, press it again to finish, and Flow
-transcribes, polishes, and pastes the result into the application where recording
-began.
+transcribes, polishes, and pastes the result at the cursor in the application
+that is active when recording ends.
 
 ## Requirements
 

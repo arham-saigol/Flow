@@ -380,18 +380,18 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
         let target_hwnd = HWND(target.hwnd as *mut _);
         if target.hwnd == 0 || !IsWindow(target_hwnd).as_bool() {
             return Err(FlowError::Windows(
-                "The application you started dictating in is no longer open.".into(),
+                "The application selected when dictation ended is no longer open.".into(),
             ));
         }
         if !SetForegroundWindow(target_hwnd).as_bool() {
             return Err(FlowError::Windows(
-                "Flow could not return focus to the application where dictation started.".into(),
+                "Flow could not focus the application selected when dictation ended.".into(),
             ));
         }
         thread::sleep(Duration::from_millis(24));
         if GetForegroundWindow().0 != target_hwnd.0 {
             return Err(FlowError::Windows(
-                "The application where dictation started did not regain focus.".into(),
+                "The application selected when dictation ended did not gain focus.".into(),
             ));
         }
 
