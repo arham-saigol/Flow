@@ -62,7 +62,6 @@ impl GroqClient {
         api_key: &str,
         wav: Vec<u8>,
         dictionary: &[String],
-        automatic_language: bool,
     ) -> Result<String> {
         let prompt = if dictionary.is_empty() {
             String::new()
@@ -75,15 +74,13 @@ impl GroqClient {
             .map_err(|error| {
                 FlowError::Message(format!("Could not prepare the recording: {error}"))
             })?;
-        let mut form = multipart::Form::new()
+        let form = multipart::Form::new()
             .part("file", file)
             .text("model", "whisper-large-v3")
             .text("response_format", "json")
             .text("temperature", "0")
+            .text("language", "en")
             .text("prompt", prompt);
-        if !automatic_language {
-            form = form.text("language", "en");
-        }
         let response = self
             .client
             .post(format!("{API_BASE}/audio/transcriptions"))

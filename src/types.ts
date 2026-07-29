@@ -37,7 +37,6 @@ export interface SettingsData {
   keybind: string;
   launch_at_startup: boolean;
   history_retention: string;
-  automatic_language: boolean;
 }
 
 export interface Microphone {

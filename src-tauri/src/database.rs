@@ -108,10 +108,6 @@ impl Database {
             history_retention: self
                 .setting("history_retention")?
                 .unwrap_or(defaults.history_retention),
-            automatic_language: self
-                .setting("automatic_language")?
-                .map(|value| value == "true")
-                .unwrap_or(defaults.automatic_language),
         })
     }
 
@@ -134,15 +130,6 @@ impl Database {
             &transaction,
             "history_retention",
             &settings.history_retention,
-        )?;
-        Self::put_setting(
-            &transaction,
-            "automatic_language",
-            if settings.automatic_language {
-                "true"
-            } else {
-                "false"
-            },
         )?;
         if let Some(seconds) = retention_seconds(&settings.history_retention) {
             transaction.execute(

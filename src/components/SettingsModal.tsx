@@ -11,7 +11,6 @@ const defaults: SettingsData = {
   keybind: "Right Alt",
   launch_at_startup: false,
   history_retention: "30 days",
-  automatic_language: true,
 };
 
 export function SettingsModal({
@@ -148,10 +147,6 @@ export function SettingsModal({
             <label className="toggle-row">
               <div><span>Launch at startup</span><p>Keep Flow ready in the system tray.</p></div>
               <input type="checkbox" checked={settings.launch_at_startup} onChange={(e) => setSettings({ ...settings, launch_at_startup: e.target.checked })} />
-            </label>
-            <label className="toggle-row">
-              <div><span>Automatic language selection</span><p>Let Whisper identify the spoken language.</p></div>
-              <input type="checkbox" checked={settings.automatic_language} onChange={(e) => setSettings({ ...settings, automatic_language: e.target.checked })} />
             </label>
           </div>
         </div>

@@ -498,6 +498,9 @@ fn extended_key_flag(extended: bool) -> KEYBD_EVENT_FLAGS {
 
 fn report_input_error(app: AppHandle, error: FlowError) {
     tauri::async_runtime::spawn(async move {
+        if RECORDING.load(Ordering::Acquire) {
+            crate::workflow::cancel(&app);
+        }
         crate::workflow::report_error(&app, error);
     });
 }

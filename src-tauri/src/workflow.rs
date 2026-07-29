@@ -90,12 +90,7 @@ pub async fn stop_and_process(app: &AppHandle) {
             .collect::<Vec<_>>();
         let transcript = state
             .groq
-            .transcribe(
-                &api_key,
-                recording.wav,
-                &dictionary,
-                settings.automatic_language,
-            )
+            .transcribe(&api_key, recording.wav, &dictionary)
             .await?;
 
         let normalized = normalize_utterance(&transcript);

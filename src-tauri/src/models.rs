@@ -42,7 +42,6 @@ pub struct SettingsData {
     pub keybind: String,
     pub launch_at_startup: bool,
     pub history_retention: String,
-    pub automatic_language: bool,
 }
 
 impl Default for SettingsData {
@@ -54,7 +53,6 @@ impl Default for SettingsData {
             keybind: "Right Alt".into(),
             launch_at_startup: false,
             history_retention: "30 days".into(),
-            automatic_language: true,
         }
     }
 }
