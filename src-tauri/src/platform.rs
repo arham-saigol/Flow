@@ -158,7 +158,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                 });
             }
         }
-        if selected_key == 0xA5 {
+        if matches!(selected_key, 0xA3..=0xA5) {
             return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);

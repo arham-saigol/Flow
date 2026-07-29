@@ -238,11 +238,25 @@ fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
             .default_input_device()
             .ok_or_else(|| FlowError::Audio("No microphone was found.".into()));
     }
+    let parsed_id = microphone_id.split_once('\u{1f}');
+    if let Some((index, name)) = parsed_id {
+        if let Ok(index) = index.parse::<usize>() {
+            let mut devices = host.input_devices().map_err(|error| {
+                FlowError::Audio(format!("Could not enumerate microphones: {error}"))
+            })?;
+            if let Some(device) = devices.nth(index) {
+                if device.name().is_ok_and(|device_name| device_name == name) {
+                    return Ok(device);
+                }
+            }
+        }
+    }
     let devices = host
         .input_devices()
         .map_err(|error| FlowError::Audio(format!("Could not enumerate microphones: {error}")))?;
+    let fallback_name = parsed_id.map_or(microphone_id, |(_, name)| name);
     for device in devices {
-        if device.name().unwrap_or_default() == microphone_id {
+        if device.name().unwrap_or_default() == fallback_name {
             return Ok(device);
         }
     }
@@ -343,10 +357,10 @@ pub fn list_microphones() -> Result<Vec<Microphone>> {
         .input_devices()
         .map_err(|error| FlowError::Audio(format!("Could not enumerate microphones: {error}")))?;
     let mut result = Vec::new();
-    for device in devices {
+    for (index, device) in devices.enumerate() {
         if let Ok(name) = device.name() {
             result.push(Microphone {
-                id: name.clone(),
+                id: format!("{index}\u{1f}{name}"),
                 is_default: default_name.as_deref() == Some(name.as_str()),
                 name,
             });

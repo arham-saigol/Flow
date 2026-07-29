@@ -156,6 +156,10 @@ impl Database {
     }
 
     pub fn dashboard(&self) -> Result<DashboardData> {
+        let retention = self
+            .setting("history_retention")?
+            .unwrap_or_else(|| SettingsData::default().history_retention);
+        self.prune_history(&retention)?;
         let week_ago = Self::now() - 7 * 86_400;
         let conn = self.conn()?;
         let (words, count, duration): (i64, i64, i64) = conn.query_row(
