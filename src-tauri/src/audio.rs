@@ -306,6 +306,10 @@ where
     T: cpal::SizedSample + Copy + Send + 'static,
 {
     let error_app = app.clone();
+    let limit_app = app.clone();
+    let limit_sender = error_sender.clone();
+    let maximum_samples = config.sample_rate.0 as usize * 5 * 60;
+    let mut limit_reported = false;
     device
         .build_input_stream(
             config,
@@ -319,7 +323,16 @@ where
                     mono.push(sample);
                 }
                 if let Ok(mut destination) = samples.lock() {
-                    destination.extend_from_slice(&mono);
+                    let remaining = maximum_samples.saturating_sub(destination.len());
+                    let accepted = remaining.min(mono.len());
+                    destination.extend_from_slice(&mono[..accepted]);
+                    if accepted < mono.len() && !limit_reported {
+                        limit_reported = true;
+                        let _ = limit_sender.send(RecorderCommand::StreamFailed {
+                            app: limit_app.clone(),
+                            message: "The recording reached the five-minute limit.".into(),
+                        });
+                    }
                 }
                 if counter.fetch_add(mono.len(), Ordering::Relaxed) + mono.len() >= threshold {
                     counter.store(0, Ordering::Relaxed);

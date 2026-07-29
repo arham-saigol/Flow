@@ -22,13 +22,14 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-                KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_ESCAPE,
+                KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_ESCAPE, VK_RETURN,
             },
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
                 SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
-                KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+                KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+                WM_SYSKEYUP, WM_XBUTTONDOWN, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
             },
         },
     },
@@ -119,7 +120,7 @@ pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
         .name("flow-keyboard-hook".into())
         .spawn(move || unsafe {
             let module = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            let hook = match SetWindowsHookExW(
+            let keyboard_hook_handle = match SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(keyboard_hook),
                 HINSTANCE(module.0),
@@ -133,10 +134,20 @@ pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
                     return;
                 }
             };
+            let mouse_hook_handle =
+                match SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook), HINSTANCE(module.0), 0) {
+                    Ok(hook) => hook,
+                    Err(error) => {
+                        let _ = ready_sender.send(Err(format!(
+                            "Could not install the mouse gesture handler: {error}"
+                        )));
+                        return;
+                    }
+                };
             if ready_sender.send(Ok(())).is_err() {
                 return;
             }
-            message_loop(hook);
+            message_loop(keyboard_hook_handle, mouse_hook_handle);
         })
         .map_err(|error| {
             FlowError::Windows(format!("Could not start the keyboard handler: {error}"))
@@ -147,9 +158,28 @@ pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
         .map_err(FlowError::Windows)
 }
 
-unsafe fn message_loop(_hook: HHOOK) {
+unsafe fn message_loop(_keyboard_hook: HHOOK, _mouse_hook: HHOOK) {
     let mut message = MSG::default();
     while GetMessageW(&mut message, HWND::default(), 0, 0).as_bool() {}
+}
+
+unsafe extern "system" fn mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0
+        && matches!(
+            wparam.0 as u32,
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+        )
+        && SELECTED_KEY_DOWN.load(Ordering::Acquire)
+        && !SELECTED_KEY_CHORDED.swap(true, Ordering::AcqRel)
+    {
+        let selected_key = SELECTED_KEY.load(Ordering::Acquire);
+        if let Err(error) = replay_key_down(selected_key as u16) {
+            if let Some(app) = APP.get() {
+                report_input_error(app.clone(), error);
+            }
+        }
+    }
+    CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -375,9 +405,24 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
 
 unsafe fn send_unicode(text: &str) -> Result<()> {
     let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
-    for unit in text.encode_utf16() {
-        inputs.push(key_input(0, unit, KEYEVENTF_UNICODE));
-        inputs.push(key_input(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
+        } else if character == '\n' {
+            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
+        } else {
+            let mut encoded = [0_u16; 2];
+            for unit in character.encode_utf16(&mut encoded) {
+                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE));
+                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            }
+        }
     }
     for chunk in inputs.chunks(64) {
         send_inputs(chunk)?;
@@ -401,6 +446,10 @@ unsafe fn replay_chord(selected_key: u16, chord_key: u16) -> Result<()> {
         key_input(selected_key, 0, KEYBD_EVENT_FLAGS(0)),
         key_input(chord_key, 0, KEYBD_EVENT_FLAGS(0)),
     ])
+}
+
+unsafe fn replay_key_down(key: u16) -> Result<()> {
+    send_inputs(&[key_input(key, 0, KEYBD_EVENT_FLAGS(0))])
 }
 
 fn report_input_error(app: AppHandle, error: FlowError) {
