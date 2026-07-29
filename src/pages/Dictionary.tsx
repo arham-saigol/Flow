@@ -36,7 +36,6 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     <section className="page page--narrow">
       <header className="page-header">
         <div>
-          <p className="eyebrow">Personal vocabulary</p>
           <h1>Dictionary</h1>
           <p>Teach Flow the exact spelling of words and names you use.</p>
         </div>

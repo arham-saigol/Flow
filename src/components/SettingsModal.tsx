@@ -84,7 +84,6 @@ export function SettingsModal({
       <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header>
           <div>
-            <p className="eyebrow">Preferences</p>
             <h2 id="settings-title">Settings</h2>
           </div>
           <button className="icon-button" aria-label="Close" onClick={onClose}><X size={18} /></button>

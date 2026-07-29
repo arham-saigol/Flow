@@ -93,7 +93,6 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
     <section className="page page--narrow">
       <header className="page-header">
         <div>
-          <p className="eyebrow">Speak to expand</p>
           <h1>Snippets</h1>
           <p>Say an exact trigger to paste its content instantly.</p>
         </div>

@@ -68,7 +68,6 @@ export function Dashboard({
     <section className="page">
       <header className="page-header">
         <div>
-          <p className="eyebrow">Overview</p>
           <h1>Dashboard</h1>
           <p>Everything you’ve said, made clearer.</p>
         </div>
