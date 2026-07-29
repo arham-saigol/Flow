@@ -35,9 +35,11 @@ function relativeTime(timestamp: number) {
 
 export function Dashboard({
   version,
+  keybind,
   notify,
 }: {
   version: number;
+  keybind: string;
   notify: (data: ToastData) => void;
 }) {
   const [data, setData] = useState(empty);
@@ -95,7 +97,7 @@ export function Dashboard({
           <EmptyState
             icon={HistoryIcon}
             title="Your words will land here"
-            description="Press Right Alt anywhere to start your first dictation."
+            description={`Press ${keybind} anywhere to start your first dictation.`}
           />
         ) : (
           <div className="history-list">

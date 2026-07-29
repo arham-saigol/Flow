@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -8,6 +8,8 @@ use crate::{
     models::{MessagePayload, OverlayPayload},
     platform, AppState,
 };
+
+static ERROR_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub async fn toggle(app: &AppHandle) {
     let state = app.state::<AppState>();
@@ -25,6 +27,7 @@ pub fn start(app: &AppHandle) -> Result<()> {
     if state.busy.swap(true, Ordering::AcqRel) {
         return Err(FlowError::AlreadyRecording);
     }
+    ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
     let result = (|| {
         let has_key = credentials::has_api_key();
         if !has_key {
@@ -32,11 +35,11 @@ pub fn start(app: &AppHandle) -> Result<()> {
         }
         let settings = state.database.settings(true)?;
         let target = platform::capture_target();
+        platform::prepare_overlay(app, target)?;
         state
             .recorder
             .start(app.clone(), &settings.microphone_id, target)?;
         platform::set_recording(true);
-        platform::prepare_overlay(app, target)?;
         emit_overlay(app, "recording", None);
         Ok(())
     })();
@@ -129,6 +132,9 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
     let state = app.state::<AppState>();
     state.busy.store(false, Ordering::Release);
     let message = friendly_error(error);
+    if platform::prepare_overlay(app, platform::capture_target()).is_err() {
+        crate::show_main(app);
+    }
     emit_overlay(app, "error", Some(&message));
     let _ = app.emit(
         "flow-error",
@@ -136,11 +142,14 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
             message: message.clone(),
         },
     );
+    let generation = ERROR_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio_sleep(std::time::Duration::from_secs(4)).await;
-        if let Some(window) = app_clone.get_webview_window("overlay") {
-            let _ = window.hide();
+        if ERROR_GENERATION.load(Ordering::Acquire) == generation {
+            if let Some(window) = app_clone.get_webview_window("overlay") {
+                let _ = window.hide();
+            }
         }
     });
 }

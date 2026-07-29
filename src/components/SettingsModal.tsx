@@ -21,7 +21,7 @@ export function SettingsModal({
 }: {
   onClose: () => void;
   notify: (data: ToastData) => void;
-  onSaved: () => void;
+  onSaved: (keybind: string) => void;
 }) {
   const [settings, setSettings] = useState(defaults);
   const [microphones, setMicrophones] = useState<Microphone[]>([]);
@@ -64,7 +64,7 @@ export function SettingsModal({
         apiKey || undefined,
       );
       notify({ kind: "success", message: "Settings saved" });
-      onSaved();
+      onSaved(settings.keybind);
       onClose();
     } catch (error) {
       notify({ kind: "error", message: String(error) });

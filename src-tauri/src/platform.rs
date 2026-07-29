@@ -42,6 +42,7 @@ use crate::error::{FlowError, Result};
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static SELECTED_KEY: AtomicU32 = AtomicU32::new(0xA5); // VK_RMENU
 static SELECTED_KEY_DOWN: AtomicBool = AtomicBool::new(false);
+static SELECTED_KEY_CHORDED: AtomicBool = AtomicBool::new(false);
 static RECORDING: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
@@ -79,6 +80,7 @@ pub fn configure_keybind(keybind: &str) {
     };
     SELECTED_KEY.store(key, Ordering::Release);
     SELECTED_KEY_DOWN.store(false, Ordering::Release);
+    SELECTED_KEY_CHORDED.store(false, Ordering::Release);
 }
 
 pub fn set_recording(recording: bool) {
@@ -131,12 +133,23 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         return LRESULT(1);
     }
 
-    if vk == SELECTED_KEY.load(Ordering::Acquire) {
+    let selected_key = SELECTED_KEY.load(Ordering::Acquire);
+    if vk != selected_key
+        && (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
+        && SELECTED_KEY_DOWN.load(Ordering::Acquire)
+    {
+        SELECTED_KEY_CHORDED.store(true, Ordering::Release);
+    }
+
+    if vk == selected_key {
         if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
             // Repeated key-down messages never toggle. A complete physical press toggles on key-up.
-            SELECTED_KEY_DOWN.store(true, Ordering::Release);
+            if !SELECTED_KEY_DOWN.swap(true, Ordering::AcqRel) {
+                SELECTED_KEY_CHORDED.store(false, Ordering::Release);
+            }
         } else if (message == WM_KEYUP || message == WM_SYSKEYUP)
             && SELECTED_KEY_DOWN.swap(false, Ordering::AcqRel)
+            && !SELECTED_KEY_CHORDED.swap(false, Ordering::AcqRel)
         {
             if let Some(app) = APP.get() {
                 let app = app.clone();
@@ -144,6 +157,9 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
                     crate::workflow::toggle(&app).await;
                 });
             }
+        }
+        if selected_key == 0xA5 {
+            return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
         }
         return LRESULT(1);
     }

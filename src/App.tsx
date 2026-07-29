@@ -26,6 +26,7 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
   const [dashboardVersion, setDashboardVersion] = useState(0);
+  const [keybind, setKeybind] = useState("Right Alt");
 
   const notify = useCallback((data: ToastData) => {
     setToast(data);
@@ -33,6 +34,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    void api
+      .settings()
+      .then((settings) => setKeybind(settings.keybind))
+      .catch((error) => notify({ kind: "error", message: String(error) }));
     const unlisten = listen<{ message: string }>("dictation-complete", () => {
       setDashboardVersion((version) => version + 1);
       notify({ kind: "success", message: "Dictation pasted" });
@@ -71,13 +76,15 @@ export default function App() {
           </button>
           <div className="shortcut-hint">
             <span>Start dictating</span>
-            <kbd>Right Alt</kbd>
+            <kbd>{keybind}</kbd>
           </div>
         </div>
       </aside>
 
       <main className="main-content">
-        {page === "dashboard" && <Dashboard version={dashboardVersion} notify={notify} />}
+        {page === "dashboard" && (
+          <Dashboard version={dashboardVersion} keybind={keybind} notify={notify} />
+        )}
         {page === "dictionary" && <Dictionary notify={notify} />}
         {page === "snippets" && <Snippets notify={notify} />}
       </main>
@@ -86,7 +93,8 @@ export default function App() {
         <SettingsModal
           onClose={() => setSettingsOpen(false)}
           notify={notify}
-          onSaved={() => {
+          onSaved={(savedKeybind) => {
+            setKeybind(savedKeybind);
             void api.dashboard().then(() => setDashboardVersion((v) => v + 1));
           }}
         />
