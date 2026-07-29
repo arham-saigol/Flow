@@ -80,6 +80,8 @@ export default function Overlay() {
   }, []);
 
   const waveformProfile = [0.12, 0.24, 0.43, 0.72, 0.94, 1, 0.84, 0.61, 0.4, 0.24, 0.13];
+  const processingLabel =
+    state.message ?? (state.phase === "analysing" ? "Analyzing" : "Thinking");
 
   return (
     <div className={`overlay-bar overlay-bar--${state.phase}`}>
@@ -99,8 +101,8 @@ export default function Overlay() {
         <div className="overlay-error">{state.message}</div>
       ) : (
         <div className="processing-indicator">
-          <span className="shimmer-label">
-            {state.message ?? (state.phase === "analysing" ? "Analyzing" : "Thinking")}
+          <span className="shimmer-label" data-label={processingLabel}>
+            {processingLabel}
           </span>
           <Progress.Root
             className="processing-progress"

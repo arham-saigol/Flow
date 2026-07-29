@@ -297,24 +297,29 @@ body:has(.overlay-bar) #root {
   position: relative;
   z-index: 1;
   display: block;
-  transform: translateY(-.5px);
+  color: #d8d5d0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: -.01em;
+}
+.shimmer-label::after {
+  content: attr(data-label);
+  position: absolute;
+  inset: 0;
   color: transparent;
   background: linear-gradient(
     100deg,
-    #aaa8a3 22%,
-    #f8f7f4 45%,
-    #f8f7f4 55%,
-    #aaa8a3 78%
+    transparent 24%,
+    rgba(255, 255, 255, .72) 50%,
+    transparent 76%
   );
-  background-size: 220% 100%;
+  background-size: 240% 100%;
   background-position: 120% 0;
   background-clip: text;
   -webkit-background-clip: text;
-  font-size: 13px;
-  font-weight: 550;
-  line-height: 16px;
-  letter-spacing: -.01em;
-  animation: text-shimmer 1.7s ease-in-out infinite;
+  pointer-events: none;
+  animation: text-shimmer 1.9s ease-in-out infinite;
 }
 @keyframes text-shimmer {
   0% { background-position: 120% 0; }
@@ -350,7 +355,7 @@ body:has(.overlay-bar) #root {
 .overlay-bar--error { border-color: rgba(248, 247, 244, .56); }
 
 @media (prefers-reduced-motion: reduce) {
-  .shimmer-label { animation: none; color: #dedcd7; background: none; }
+  .shimmer-label::after { content: none; animation: none; }
   .processing-progress__fill { transition: none; }
 }
 
