@@ -9,16 +9,9 @@ use std::{
 
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
-    Device, SampleFormat, Stream, StreamConfig,
+    Device, DeviceId, SampleFormat, Stream, StreamConfig,
 };
 use tauri::{AppHandle, Emitter};
-use windows::Win32::{
-    Media::Audio::{
-        eAll, eCapture, eConsole, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator,
-        DEVICE_STATE_ACTIVE,
-    },
-    System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL},
-};
 
 use crate::{
     error::{FlowError, Result},
@@ -184,11 +177,11 @@ fn begin_recording(
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
     let samples = Arc::new(Mutex::new(Vec::with_capacity(
-        config.sample_rate.0 as usize * 30,
+        config.sample_rate as usize * 30,
     )));
     let emit_counter = Arc::new(AtomicUsize::new(0));
     let channels = config.channels as usize;
-    let threshold = (config.sample_rate.0 / 30).max(1) as usize;
+    let threshold = (config.sample_rate / 30).max(1) as usize;
     let stream = match sample_format {
         SampleFormat::F32 => build_stream::<f32>(
             &device,
@@ -312,7 +305,7 @@ fn begin_recording(
     Ok(ActiveRecording {
         _stream: stream,
         samples,
-        sample_rate: config.sample_rate.0,
+        sample_rate: config.sample_rate,
         started: Instant::now(),
         target,
     })
@@ -343,12 +336,11 @@ fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
             .default_input_device()
             .ok_or_else(|| FlowError::Audio("No microphone was found.".into()));
     }
-    let mut devices = host
-        .devices()
-        .map_err(|error| FlowError::Audio(format!("Could not enumerate microphones: {error}")))?;
-    let (endpoint_ids, _) = windows_audio_endpoint_ids()?;
-    if let Some(index) = endpoint_ids.iter().position(|id| id == microphone_id) {
-        if let Some(device) = devices.nth(index) {
+    let device_id = microphone_id
+        .parse::<DeviceId>()
+        .unwrap_or_else(|_| DeviceId(cpal::platform::HostId::Wasapi, microphone_id.into()));
+    if let Some(device) = host.device_by_id(&device_id) {
+        if device.supports_input() {
             return Ok(device);
         }
     }
@@ -359,7 +351,11 @@ fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
         .split_once('\u{1f}')
         .map_or(microphone_id, |(_, name)| name);
     for device in devices {
-        if device.name().unwrap_or_default() == fallback_name {
+        if device
+            .description()
+            .map(|description| description.name() == fallback_name)
+            .unwrap_or(false)
+        {
             return Ok(device);
         }
     }
@@ -385,7 +381,7 @@ where
     let error_app = app.clone();
     let limit_app = app.clone();
     let limit_sender = error_sender.clone();
-    let maximum_samples = config.sample_rate.0 as usize * 5 * 60;
+    let maximum_samples = config.sample_rate as usize * 5 * 60;
     let mut limit_reported = false;
     device
         .build_input_stream(
@@ -472,28 +468,30 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
 pub fn list_microphones() -> Result<Vec<Microphone>> {
     let host = cpal::default_host();
     let devices = host
-        .devices()
+        .input_devices()
         .map_err(|error| FlowError::Audio(format!("Could not enumerate microphones: {error}")))?;
-    let (endpoint_ids, default_id) = windows_audio_endpoint_ids()?;
+    let default_id = host
+        .default_input_device()
+        .and_then(|device| device.id().ok());
     let mut result = Vec::new();
-    for (index, device) in devices.enumerate() {
-        let supports_input = device
-            .supported_input_configs()
-            .map(|mut configs| configs.next().is_some())
-            .unwrap_or(false);
-        if supports_input {
-            let name = device.name().map_err(|error| {
+    for device in devices {
+        let name = device
+            .description()
+            .map_err(|error| {
                 FlowError::Audio(format!("Could not read a microphone name: {error}"))
-            })?;
-            let id = endpoint_ids.get(index).cloned().ok_or_else(|| {
-                FlowError::Audio("Could not identify a Windows audio endpoint.".into())
-            })?;
-            result.push(Microphone {
-                is_default: default_id.as_ref() == Some(&id),
-                id,
-                name,
-            });
-        }
+            })?
+            .name()
+            .to_owned();
+        let id = device.id().map_err(|error| {
+            FlowError::Audio(format!(
+                "Could not identify a Windows audio endpoint: {error}"
+            ))
+        })?;
+        result.push(Microphone {
+            is_default: default_id.as_ref() == Some(&id),
+            id: id.to_string(),
+            name,
+        });
     }
     result.sort_by(|a, b| {
         b.is_default
@@ -501,49 +499,4 @@ pub fn list_microphones() -> Result<Vec<Microphone>> {
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(result)
-}
-
-fn windows_audio_endpoint_ids() -> Result<(Vec<String>, Option<String>)> {
-    unsafe {
-        let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).map_err(|error| {
-                FlowError::Audio(format!("Could not access Windows audio devices: {error}"))
-            })?;
-        let collection = enumerator
-            .EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE)
-            .map_err(|error| {
-                FlowError::Audio(format!(
-                    "Could not enumerate Windows audio devices: {error}"
-                ))
-            })?;
-        let count = collection.GetCount().map_err(|error| {
-            FlowError::Audio(format!("Could not count Windows audio devices: {error}"))
-        })?;
-        let mut ids = Vec::with_capacity(count as usize);
-        for index in 0..count {
-            let device = collection.Item(index).map_err(|error| {
-                FlowError::Audio(format!("Could not access a Windows audio device: {error}"))
-            })?;
-            ids.push(windows_audio_endpoint_id(&device)?);
-        }
-        let default_id = enumerator
-            .GetDefaultAudioEndpoint(eCapture, eConsole)
-            .ok()
-            .map(|device| windows_audio_endpoint_id(&device))
-            .transpose()?;
-        Ok((ids, default_id))
-    }
-}
-
-unsafe fn windows_audio_endpoint_id(device: &IMMDevice) -> Result<String> {
-    let raw = device.GetId().map_err(|error| {
-        FlowError::Audio(format!(
-            "Could not identify a Windows audio device: {error}"
-        ))
-    })?;
-    let id = raw.to_string().map_err(|error| {
-        FlowError::Audio(format!("Could not read a Windows audio device ID: {error}"))
-    });
-    CoTaskMemFree(Some(raw.as_ptr().cast()));
-    id
 }
