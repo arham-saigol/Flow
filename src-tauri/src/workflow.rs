@@ -1,0 +1,194 @@
+use std::sync::atomic::Ordering;
+
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::{
+    credentials,
+    error::{FlowError, Result},
+    models::{MessagePayload, OverlayPayload},
+    platform, AppState,
+};
+
+pub async fn toggle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.recorder.is_recording() {
+        stop_and_process(app).await;
+    } else if !state.busy.load(Ordering::Acquire) {
+        if let Err(error) = start(app) {
+            report_error(app, error);
+        }
+    }
+}
+
+pub fn start(app: &AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    if state.busy.swap(true, Ordering::AcqRel) {
+        return Err(FlowError::AlreadyRecording);
+    }
+    let result = (|| {
+        let has_key = credentials::has_api_key();
+        if !has_key {
+            return Err(FlowError::MissingApiKey);
+        }
+        let settings = state.database.settings(true)?;
+        let target = platform::capture_target();
+        state
+            .recorder
+            .start(app.clone(), &settings.microphone_id, target)?;
+        platform::set_recording(true);
+        platform::prepare_overlay(app, target)?;
+        emit_overlay(app, "recording", None);
+        Ok(())
+    })();
+    if result.is_err() {
+        state.busy.store(false, Ordering::Release);
+    }
+    result
+}
+
+pub async fn stop_and_process(app: &AppHandle) {
+    platform::set_recording(false);
+    let state = app.state::<AppState>();
+    let recording = match state.recorder.stop() {
+        Ok(recording) => recording,
+        Err(error) => {
+            state.busy.store(false, Ordering::Release);
+            report_error(app, error);
+            return;
+        }
+    };
+    emit_overlay(app, "analysing", Some("Analysing"));
+
+    let result = async {
+        let api_key = credentials::read_api_key()?;
+        let settings = state.database.settings(true)?;
+        let dictionary = state
+            .database
+            .dictionary()?
+            .into_iter()
+            .map(|entry| entry.value)
+            .collect::<Vec<_>>();
+        let transcript = state
+            .groq
+            .transcribe(
+                &api_key,
+                recording.wav,
+                &dictionary,
+                settings.automatic_language,
+            )
+            .await?;
+
+        let normalized = normalize_utterance(&transcript);
+        let snippet = state
+            .database
+            .snippets()?
+            .into_iter()
+            .find(|snippet| normalize_utterance(&snippet.trigger) == normalized);
+        let final_text = if let Some(snippet) = snippet {
+            snippet.content
+        } else {
+            emit_overlay(app, "thinking", Some("Thinking"));
+            state.groq.clean(&api_key, &transcript, &dictionary).await?
+        };
+
+        platform::paste_text(recording.target, &final_text)?;
+        state
+            .database
+            .insert_history(&final_text, &transcript, recording.duration_ms)?;
+        state.database.prune_history(&settings.history_retention)?;
+        Ok::<_, FlowError>(())
+    }
+    .await;
+
+    state.busy.store(false, Ordering::Release);
+    match result {
+        Ok(()) => {
+            hide_overlay(app);
+            let _ = app.emit(
+                "dictation-complete",
+                MessagePayload {
+                    message: "Dictation pasted".into(),
+                },
+            );
+        }
+        Err(error) => report_error(app, error),
+    }
+}
+
+pub fn cancel(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    if state.recorder.cancel().is_ok() {
+        platform::set_recording(false);
+        state.busy.store(false, Ordering::Release);
+        hide_overlay(app);
+    }
+}
+
+pub fn report_error(app: &AppHandle, error: FlowError) {
+    platform::set_recording(false);
+    let state = app.state::<AppState>();
+    state.busy.store(false, Ordering::Release);
+    let message = friendly_error(error);
+    emit_overlay(app, "error", Some(&message));
+    let _ = app.emit(
+        "flow-error",
+        MessagePayload {
+            message: message.clone(),
+        },
+    );
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio_sleep(std::time::Duration::from_secs(4)).await;
+        if let Some(window) = app_clone.get_webview_window("overlay") {
+            let _ = window.hide();
+        }
+    });
+}
+
+fn emit_overlay(app: &AppHandle, phase: &str, message: Option<&str>) {
+    let _ = app.emit_to(
+        "overlay",
+        "overlay-state",
+        OverlayPayload {
+            phase: phase.into(),
+            message: message.map(str::to_owned),
+        },
+    );
+}
+
+fn hide_overlay(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("overlay") {
+        let _ = window.hide();
+    }
+}
+
+pub(crate) fn normalize_utterance(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches(|character: char| {
+            character.is_ascii_punctuation() || character.is_whitespace()
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn friendly_error(error: FlowError) -> String {
+    match error {
+        FlowError::Network(_) => {
+            "Flow couldn’t reach Groq. Check your connection and try again.".into()
+        }
+        other => other.to_string(),
+    }
+}
+
+async fn tokio_sleep(duration: std::time::Duration) {
+    // Tauri's async runtime provides a Tokio context through the default runtime.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        std::thread::sleep(duration);
+        let _ = sender.send(());
+    });
+    let _ = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await;
+}
