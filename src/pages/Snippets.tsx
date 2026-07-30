@@ -46,10 +46,7 @@ function SnippetRow({
           <label>Content<textarea rows={4} value={content} onChange={(e) => setContent(e.target.value)} /></label>
         </div>
       ) : (
-        <div className="snippet-copy">
-          <span>{snippet.trigger}</span>
-          <p>{snippet.content}</p>
-        </div>
+        <div className="snippet-copy">{snippet.trigger}</div>
       )}
       <div className="row-actions">
         {editing ? (
