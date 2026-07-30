@@ -7,7 +7,7 @@ import {
   Command,
   Gauge,
   Minus,
-  Settings,
+  SlidersHorizontal,
   Square,
   X,
 } from "lucide-react";
@@ -139,7 +139,7 @@ export default function App() {
           </nav>
           <div className="sidebar__bottom">
             <button onClick={() => setSettingsOpen(true)}>
-              <Settings size={18} strokeWidth={1.75} />
+              <SlidersHorizontal size={18} strokeWidth={1.75} />
               <span>Settings</span>
             </button>
             <div className="shortcut-hint">

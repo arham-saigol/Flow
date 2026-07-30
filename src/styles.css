@@ -254,31 +254,140 @@ textarea { resize: vertical; line-height: 1.5; }
 .snippet-edit { display: grid; gap: 10px; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 25px; background: rgba(43, 39, 33, .28); backdrop-filter: blur(4px); }
-.settings-modal { width: min(650px, calc(100vw - 50px)); max-height: calc(100vh - 50px); display: flex; flex-direction: column; background: var(--bg); border: 1px solid #d8d0c4; border-radius: 16px; box-shadow: 0 30px 80px rgba(37, 31, 23, .22); overflow: hidden; }
-.settings-modal > header { padding: 22px 25px 18px; display: flex; align-items: flex-start; justify-content: space-between; border-bottom: 1px solid var(--border); }
-.settings-modal > header h2 { margin: 0; font: 700 22px/1.15 "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: -.6px; }
-.settings-body { overflow: auto; padding: 22px 25px; display: grid; gap: 18px; }
-.settings-group { display: flex; flex-direction: column; gap: 12px; padding: 18px; background: var(--panel); border: 1px solid var(--border-soft); border-radius: 12px; }
-.settings-group__heading h3 { margin: 0 0 3px; font: 600 14px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
-.settings-group__heading p { margin: 0; color: var(--muted); font-size: 11px; }
-.settings-grid { display: grid; grid-template-columns: 1fr 1fr; }
-.settings-grid .field:last-child { grid-column: 1 / -1; }
-.field { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
-.field input, .field select { height: 39px; padding: 8px 10px; font-size: 12px; }
+.settings-modal {
+  width: min(820px, calc(100vw - 50px));
+  height: min(590px, calc(100vh - 50px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  border: 1px solid #d8d0c4;
+  border-radius: 16px;
+  box-shadow: 0 30px 80px rgba(37, 31, 23, .22);
+  overflow: hidden;
+}
+.settings-modal > header { padding: 24px 27px 18px; }
+.settings-modal > header h2 {
+  margin: 0;
+  font: 700 23px/1.15 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  letter-spacing: -.65px;
+}
+.settings-layout {
+  min-height: 0;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 175px minmax(0, 1fr);
+  padding: 0 16px 16px;
+  gap: 13px;
+}
+.settings-tabs {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #ece9e1;
+  border-radius: 12px;
+}
+.settings-tabs button {
+  width: 100%;
+  height: 40px;
+  padding: 0 11px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.settings-tabs button:hover { color: var(--text); background: rgba(55, 53, 48, .05); }
+.settings-tabs button.active {
+  color: var(--text);
+  background: var(--bg);
+  box-shadow: 0 1px 2px rgba(38, 35, 29, .07);
+}
+.settings-pane {
+  min-width: 0;
+  overflow: auto;
+  padding: 14px 15px 18px;
+}
+.settings-pane__heading { margin-bottom: 27px; }
+.settings-pane__heading h3 {
+  margin: 0 0 6px;
+  font: 700 18px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  letter-spacing: -.4px;
+}
+.settings-pane__heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.settings-form-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 22px 16px;
+}
+.field { display: grid; gap: 8px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.field--wide { grid-column: 1 / -1; }
+.field input, .field select { height: 41px; padding: 8px 11px; font-size: 13px; }
+.field small {
+  color: var(--quiet);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1.4;
+}
 .secret-field { position: relative; }
-.secret-field > svg { position: absolute; left: 11px; top: 11px; color: var(--quiet); }
+.secret-field > svg { position: absolute; left: 12px; top: 12px; color: var(--quiet); }
 .secret-field input { padding-left: 35px; padding-right: 40px; }
-.secret-field button { position: absolute; right: 5px; top: 4px; width: 31px; height: 31px; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
-.toggle-list { gap: 0; padding: 0 18px; }
-.toggle-row { min-height: 69px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--border-soft); cursor: pointer; }
-.toggle-row:last-child { border-bottom: 0; }
+.secret-field button { position: absolute; right: 5px; top: 5px; width: 31px; height: 31px; display: grid; place-items: center; color: var(--muted); border: 0; border-radius: 7px; background: transparent; cursor: pointer; }
+.hotkey-capture {
+  width: 100%;
+  height: 43px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.hotkey-capture svg { color: var(--muted); }
+.hotkey-capture:hover { border-color: #c6c1b7; }
+.hotkey-capture.is-capturing {
+  border-color: #77736c;
+  background: #f0ede6;
+}
+.toggle-row {
+  min-height: 58px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  cursor: pointer;
+}
 .toggle-row span { display: block; margin-bottom: 3px; font-size: 12px; font-weight: 600; }
 .toggle-row p { margin: 0; color: var(--muted); font-size: 10px; }
 .toggle-row input { appearance: none; width: 36px; height: 20px; padding: 0; flex: 0 0 auto; border: 0; border-radius: 20px; background: #c9c2b8; cursor: pointer; position: relative; }
 .toggle-row input::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #faf8f3; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.16); transition: 150ms; }
 .toggle-row input:checked { background: var(--accent); }
 .toggle-row input:checked::after { transform: translateX(16px); }
-.settings-modal > footer { padding: 15px 25px; display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--border); background: #f0ece5; }
+.settings-transcription { max-width: 520px; display: grid; gap: 13px; }
+.settings-modal > footer {
+  padding: 0 27px 22px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
 
 .creation-dialog {
   color: var(--text);
