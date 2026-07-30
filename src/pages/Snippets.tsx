@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
-import { Check, Command, Pencil, Plus, Trash2, X } from "lucide-react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { Check, Command, Pencil, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import type { ToastData } from "../components/Toast";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { Snippet } from "../types";
 
 function SnippetRow({
@@ -71,21 +72,50 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [trigger, setTrigger] = useState("");
   const [content, setContent] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialogFocus(addOpen, addButtonRef);
 
   useEffect(() => {
     api.snippets().then(setSnippets).catch((error) => notify({ kind: "error", message: String(error) }));
   }, [notify]);
 
+  useEffect(() => {
+    if (!addOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !adding) {
+        setAddOpen(false);
+        setTrigger("");
+        setContent("");
+      }
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [addOpen, adding]);
+
+  const closeAddDialog = () => {
+    if (adding) return;
+    setAddOpen(false);
+    setTrigger("");
+    setContent("");
+  };
+
   const add = async (event: FormEvent) => {
     event.preventDefault();
     if (!trigger.trim() || !content.trim()) return;
+    setAdding(true);
     try {
       const snippet = await api.addSnippet(trigger.trim(), content);
       setSnippets((current) => [...current, snippet]);
       setTrigger("");
       setContent("");
+      setAddOpen(false);
+      notify({ kind: "success", message: "Snippet added" });
     } catch (error) {
       notify({ kind: "error", message: String(error) });
+    } finally {
+      setAdding(false);
     }
   };
 
@@ -96,23 +126,10 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
           <h1>Snippets</h1>
           <p>Say an exact trigger to paste its content instantly.</p>
         </div>
+        <button ref={addButtonRef} className="primary-button" type="button" onClick={() => setAddOpen(true)}>
+          Add new
+        </button>
       </header>
-
-      <form className="snippet-form" onSubmit={(event) => void add(event)}>
-        <label>
-          Trigger
-          <input placeholder="e.g. my email address" value={trigger} onChange={(event) => setTrigger(event.target.value)} />
-        </label>
-        <label>
-          Content
-          <textarea rows={4} placeholder="The exact text to paste" value={content} onChange={(event) => setContent(event.target.value)} />
-        </label>
-        <div><button className="primary-button" type="submit" disabled={!trigger.trim() || !content.trim()}><Plus size={17} /> Add snippet</button></div>
-      </form>
-
-      <div className="helper-copy">
-        Matching ignores capitalization and surrounding punctuation, but the words must otherwise match exactly.
-      </div>
 
       <section className="section-block snippets-list">
         {snippets.length === 0 ? (
@@ -136,6 +153,68 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
           ))
         )}
       </section>
+
+      {addOpen && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
+        >
+          <section
+            ref={dialogRef}
+            className="creation-dialog creation-dialog--snippet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="add-snippet-title"
+          >
+            <header>
+              <h2 id="add-snippet-title">Add snippet</h2>
+            </header>
+
+            <form onSubmit={(event) => void add(event)}>
+              <div className="creation-dialog__body snippet-dialog__body">
+                <input
+                  aria-label="Snippet trigger"
+                  autoFocus
+                  placeholder="Snippet"
+                  value={trigger}
+                  maxLength={120}
+                  disabled={adding}
+                  onChange={(event) => setTrigger(event.target.value)}
+                />
+                <div className="snippet-expansion">
+                  <textarea
+                    aria-label="Snippet expansion"
+                    placeholder="Expansion"
+                    value={content}
+                    maxLength={4000}
+                    disabled={adding}
+                    onChange={(event) => setContent(event.target.value)}
+                  />
+                  <span>{content.length}/4000</span>
+                </div>
+              </div>
+              <footer>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={adding}
+                  onClick={closeAddDialog}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={!trigger.trim() || !content.trim() || adding}
+                >
+                  {adding ? "Adding…" : "Add snippet"}
+                </button>
+              </footer>
+            </form>
+          </section>
+        </div>
+      )}
     </section>
   );
 }

@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
-import { Clipboard, Clock3, History as HistoryIcon, MessageSquareText, Timer, Type } from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import type { ToastData } from "../components/Toast";
 import type { DashboardData } from "../types";
 
 const empty: DashboardData = {
-  words_this_week: 0,
-  dictations_this_week: 0,
+  total_words_dictated: 0,
+  average_words_per_minute: 0,
   time_dictated_ms: 0,
   estimated_saved_ms: 0,
   history: [],
@@ -49,6 +49,11 @@ export function Dashboard({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!isTauri()) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     api
       .dashboard()
@@ -58,10 +63,10 @@ export function Dashboard({
   }, [notify, version]);
 
   const cards = [
-    { label: "Words this week", value: number.format(data.words_this_week), icon: Type },
-    { label: "Dictations this week", value: number.format(data.dictations_this_week), icon: MessageSquareText },
-    { label: "Time dictated", value: formatDuration(data.time_dictated_ms), icon: Clock3 },
-    { label: "Estimated time saved", value: formatDuration(data.estimated_saved_ms), icon: Timer },
+    { label: "Total words dictated", value: number.format(data.total_words_dictated) },
+    { label: "Words per minute", value: number.format(data.average_words_per_minute) },
+    { label: "Time dictated this week", value: formatDuration(data.time_dictated_ms) },
+    { label: "Estimated time saved this week", value: formatDuration(data.estimated_saved_ms) },
   ];
 
   return (
@@ -74,13 +79,10 @@ export function Dashboard({
       </header>
 
       <div className="metric-grid">
-        {cards.map(({ label, value, icon: Icon }) => (
+        {cards.map(({ label, value }) => (
           <article className={`metric-card ${loading ? "loading" : ""}`} key={label}>
-            <div className="metric-card__icon"><Icon size={18} strokeWidth={1.65} /></div>
-            <div>
-              <span>{label}</span>
-              <strong>{value}</strong>
-            </div>
+            <strong>{value}</strong>
+            <span>{label}</span>
           </article>
         ))}
       </div>
@@ -97,7 +99,6 @@ export function Dashboard({
         </div>
         {data.history.length === 0 ? (
           <EmptyState
-            icon={HistoryIcon}
             title="Your words will land here"
             description={`Press ${keybind} anywhere to start your first dictation.`}
           />
@@ -114,7 +115,6 @@ export function Dashboard({
                     .catch((error) => notify({ kind: "error", message: String(error) }));
                 }}
               >
-                <div className="history-row__copy"><Clipboard size={15} /></div>
                 <div className="history-row__body">
                   <p>{entry.text}</p>
                   <div>

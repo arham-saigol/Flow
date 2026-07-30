@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   DashboardData,
   DictionaryEntry,
@@ -7,28 +7,40 @@ import type {
   Snippet,
 } from "./types";
 
+function invokeCommand<T>(
+  command: string,
+  args?: Record<string, unknown>,
+): Promise<T> {
+  if (!isTauri()) {
+    return Promise.reject(
+      new Error("This feature is only available in the Flow desktop app."),
+    );
+  }
+  return invoke<T>(command, args);
+}
+
 export const api = {
-  dashboard: () => invoke<DashboardData>("get_dashboard"),
-  dictionary: () => invoke<DictionaryEntry[]>("list_dictionary"),
+  dashboard: () => invokeCommand<DashboardData>("get_dashboard"),
+  dictionary: () => invokeCommand<DictionaryEntry[]>("list_dictionary"),
   addDictionary: (value: string) =>
-    invoke<DictionaryEntry>("add_dictionary", { value }),
+    invokeCommand<DictionaryEntry>("add_dictionary", { value }),
   updateDictionary: (id: number, value: string) =>
-    invoke<void>("update_dictionary", { id, value }),
+    invokeCommand<void>("update_dictionary", { id, value }),
   deleteDictionary: (id: number) =>
-    invoke<void>("delete_dictionary", { id }),
-  snippets: () => invoke<Snippet[]>("list_snippets"),
+    invokeCommand<void>("delete_dictionary", { id }),
+  snippets: () => invokeCommand<Snippet[]>("list_snippets"),
   addSnippet: (trigger: string, content: string) =>
-    invoke<Snippet>("add_snippet", { trigger, content }),
+    invokeCommand<Snippet>("add_snippet", { trigger, content }),
   updateSnippet: (id: number, trigger: string, content: string) =>
-    invoke<void>("update_snippet", { id, trigger, content }),
-  deleteSnippet: (id: number) => invoke<void>("delete_snippet", { id }),
-  settings: () => invoke<SettingsData>("get_settings"),
+    invokeCommand<void>("update_snippet", { id, trigger, content }),
+  deleteSnippet: (id: number) => invokeCommand<void>("delete_snippet", { id }),
+  settings: () => invokeCommand<SettingsData>("get_settings"),
   saveSettings: (settings: SettingsData, apiKey?: string) =>
-    invoke<void>("save_settings", { settings, apiKey: apiKey || null }),
-  microphones: () => invoke<Microphone[]>("list_microphones"),
-  copyText: (text: string) => invoke<void>("copy_text", { text }),
-  testApiKey: (apiKey: string) => invoke<void>("test_api_key", { apiKey }),
-  startRecording: () => invoke<void>("start_recording"),
-  stopRecording: () => invoke<void>("stop_recording"),
-  cancelRecording: () => invoke<void>("cancel_recording"),
+    invokeCommand<void>("save_settings", { settings, apiKey: apiKey || null }),
+  microphones: () => invokeCommand<Microphone[]>("list_microphones"),
+  copyText: (text: string) => invokeCommand<void>("copy_text", { text }),
+  testApiKey: (apiKey: string) => invokeCommand<void>("test_api_key", { apiKey }),
+  startRecording: () => invokeCommand<void>("start_recording"),
+  stopRecording: () => invokeCommand<void>("stop_recording"),
+  cancelRecording: () => invokeCommand<void>("cancel_recording"),
 };
