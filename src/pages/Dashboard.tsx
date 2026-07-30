@@ -6,8 +6,8 @@ import type { ToastData } from "../components/Toast";
 import type { DashboardData } from "../types";
 
 const empty: DashboardData = {
-  words_this_week: 0,
-  dictations_this_week: 0,
+  total_words_dictated: 0,
+  average_words_per_minute: 0,
   time_dictated_ms: 0,
   estimated_saved_ms: 0,
   history: [],
@@ -63,8 +63,8 @@ export function Dashboard({
   }, [notify, version]);
 
   const cards = [
-    { label: "Words this week", value: number.format(data.words_this_week) },
-    { label: "Dictations this week", value: number.format(data.dictations_this_week) },
+    { label: "Total words dictated", value: number.format(data.total_words_dictated) },
+    { label: "Words per minute", value: number.format(data.average_words_per_minute) },
     { label: "Time dictated", value: formatDuration(data.time_dictated_ms) },
     { label: "Estimated time saved", value: formatDuration(data.estimated_saved_ms) },
   ];
@@ -81,8 +81,8 @@ export function Dashboard({
       <div className="metric-grid">
         {cards.map(({ label, value }) => (
           <article className={`metric-card ${loading ? "loading" : ""}`} key={label}>
-            <span>{label}</span>
             <strong>{value}</strong>
+            <span>{label}</span>
           </article>
         ))}
       </div>

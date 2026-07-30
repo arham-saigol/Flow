@@ -41,6 +41,14 @@ impl Database {
                 created_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS history_created_at ON history(created_at DESC);
+            CREATE TABLE IF NOT EXISTS aggregate_stats (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                total_words INTEGER NOT NULL,
+                total_duration_ms INTEGER NOT NULL
+            );
+            INSERT OR IGNORE INTO aggregate_stats(id, total_words, total_duration_ms)
+            SELECT 1, COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
+            FROM history;
             CREATE TABLE IF NOT EXISTS dictionary (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 value TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -158,11 +166,17 @@ impl Database {
         self.prune_history(&retention)?;
         let week_ago = Self::now() - 7 * 86_400;
         let conn = self.conn()?;
-        let (words, count, duration): (i64, i64, i64) = conn.query_row(
-            "SELECT COALESCE(SUM(word_count), 0), COUNT(*), COALESCE(SUM(duration_ms), 0)
+        let (total_words, total_duration): (i64, i64) = conn.query_row(
+            "SELECT total_words, total_duration_ms
+             FROM aggregate_stats WHERE id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (weekly_words, weekly_duration): (i64, i64) = conn.query_row(
+            "SELECT COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
              FROM history WHERE created_at >= ?1",
             [week_ago],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let mut statement = conn.prepare(
             "SELECT id, text, raw_text, word_count, duration_ms, created_at
@@ -182,23 +196,41 @@ impl Database {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Typical speech is ~150 wpm and comfortable typing ~40 wpm.
-        let typing_ms = words.saturating_mul(1_500);
+        let average_words_per_minute = if total_duration > 0 {
+            total_words
+                .saturating_mul(60_000)
+                .saturating_add(total_duration / 2)
+                / total_duration
+        } else {
+            0
+        };
+        let typing_ms = weekly_words.saturating_mul(1_500);
         Ok(DashboardData {
-            words_this_week: words,
-            dictations_this_week: count,
-            time_dictated_ms: duration,
-            estimated_saved_ms: typing_ms.saturating_sub(duration),
+            total_words_dictated: total_words,
+            average_words_per_minute,
+            time_dictated_ms: weekly_duration,
+            estimated_saved_ms: typing_ms.saturating_sub(weekly_duration),
             history,
         })
     }
 
     pub fn insert_history(&self, text: &str, raw_text: &str, duration_ms: i64) -> Result<()> {
         let word_count = text.split_whitespace().count() as i64;
-        self.conn()?.execute(
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "INSERT INTO history(text, raw_text, word_count, duration_ms, created_at)
              VALUES(?1, ?2, ?3, ?4, ?5)",
             params![text, raw_text, word_count, duration_ms, Self::now()],
         )?;
+        transaction.execute(
+            "UPDATE aggregate_stats
+             SET total_words = total_words + ?1,
+                 total_duration_ms = total_duration_ms + ?2
+             WHERE id = 1",
+            params![word_count, duration_ms],
+        )?;
+        transaction.commit()?;
         Ok(())
     }
 

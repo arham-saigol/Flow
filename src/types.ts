@@ -23,8 +23,8 @@ export interface Snippet {
 }
 
 export interface DashboardData {
-  words_this_week: number;
-  dictations_this_week: number;
+  total_words_dictated: number;
+  average_words_per_minute: number;
   time_dictated_ms: number;
   estimated_saved_ms: number;
   history: HistoryEntry[];

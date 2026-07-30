@@ -27,8 +27,8 @@ pub struct Snippet {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardData {
-    pub words_this_week: i64,
-    pub dictations_this_week: i64,
+    pub total_words_dictated: i64,
+    pub average_words_per_minute: i64,
     pub time_dictated_ms: i64,
     pub estimated_saved_ms: i64,
     pub history: Vec<HistoryEntry>,

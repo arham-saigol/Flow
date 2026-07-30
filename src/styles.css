@@ -158,13 +158,22 @@ kbd {
   min-height: 108px;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
+  justify-content: center;
+  gap: 9px;
   padding: 18px 19px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: 12px;
 }
-.metric-card span { display: block; color: var(--muted); font-size: 11px; letter-spacing: .01em; }
+.metric-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: .075em;
+  text-transform: uppercase;
+}
 .metric-card strong { font: 700 25px/1.1 "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: -.7px; }
 .metric-card.loading strong { color: transparent; background: #e8e2d9; border-radius: 4px; width: 48px; }
 
