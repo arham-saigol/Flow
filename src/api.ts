@@ -22,10 +22,10 @@ function invokeCommand<T>(
 export const api = {
   dashboard: () => invokeCommand<DashboardData>("get_dashboard"),
   dictionary: () => invokeCommand<DictionaryEntry[]>("list_dictionary"),
-  addDictionary: (value: string) =>
-    invokeCommand<DictionaryEntry>("add_dictionary", { value }),
-  updateDictionary: (id: number, value: string) =>
-    invokeCommand<void>("update_dictionary", { id, value }),
+  addDictionary: (value: string, correction: string | null) =>
+    invokeCommand<DictionaryEntry>("add_dictionary", { value, correction }),
+  updateDictionary: (id: number, value: string, correction: string | null) =>
+    invokeCommand<void>("update_dictionary", { id, value, correction }),
   deleteDictionary: (id: number) =>
     invokeCommand<void>("delete_dictionary", { id }),
   snippets: () => invokeCommand<Snippet[]>("list_snippets"),

@@ -6,7 +6,7 @@ use unicode_categories::UnicodeCategories;
 use crate::{
     credentials,
     error::{FlowError, Result},
-    models::{MessagePayload, OverlayPayload},
+    models::{DictionaryEntry, MessagePayload, OverlayPayload},
     platform, AppState,
 };
 
@@ -89,15 +89,11 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
     let result = async {
         let api_key = credentials::read_api_key()?;
         let settings = state.database.settings(true)?;
-        let dictionary = state
-            .database
-            .dictionary()?
-            .into_iter()
-            .map(|entry| entry.value)
-            .collect::<Vec<_>>();
+        let dictionary = state.database.dictionary()?;
+        let (preferred_spellings, corrections) = dictionary_guidance(&dictionary);
         let transcript = state
             .groq
-            .transcribe(&api_key, recording.wav, &dictionary)
+            .transcribe(&api_key, recording.wav, &preferred_spellings)
             .await?;
 
         let normalized = normalize_utterance(&transcript);
@@ -110,7 +106,10 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
             snippet.content
         } else {
             emit_overlay(app, "thinking", Some("Thinking"));
-            state.groq.clean(&api_key, &transcript).await?
+            state
+                .groq
+                .clean(&api_key, &transcript, &corrections)
+                .await?
         };
 
         platform::paste_text(paste_target, &final_text)?;
@@ -224,6 +223,23 @@ async fn dismiss_overlay(app: &AppHandle, expected_generation: Option<u64>) {
     }
 }
 
+fn dictionary_guidance(entries: &[DictionaryEntry]) -> (Vec<String>, Vec<(String, String)>) {
+    let preferred_spellings = entries
+        .iter()
+        .map(|entry| entry.correction.as_ref().unwrap_or(&entry.value).to_owned())
+        .collect();
+    let corrections = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .correction
+                .as_ref()
+                .map(|correction| (entry.value.clone(), correction.clone()))
+        })
+        .collect();
+    (preferred_spellings, corrections)
+}
+
 pub(crate) fn normalize_utterance(value: &str) -> String {
     value
         .trim()
@@ -251,4 +267,33 @@ async fn tokio_sleep(duration: std::time::Duration) {
         let _ = sender.send(());
     });
     let _ = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::models::DictionaryEntry;
+
+    use super::dictionary_guidance;
+
+    #[test]
+    fn regular_dictionary_words_never_reach_cleanup_guidance() {
+        let entries = vec![
+            DictionaryEntry {
+                id: 1,
+                value: "Flow".into(),
+                correction: None,
+                created_at: 1,
+            },
+            DictionaryEntry {
+                id: 2,
+                value: "btw".into(),
+                correction: Some("by the way".into()),
+                created_at: 2,
+            },
+        ];
+
+        let (preferred_spellings, corrections) = dictionary_guidance(&entries);
+        assert_eq!(preferred_spellings, ["Flow", "by the way"]);
+        assert_eq!(corrections, [("btw".into(), "by the way".into())]);
+    }
 }

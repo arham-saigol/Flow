@@ -14,6 +14,7 @@ pub struct HistoryEntry {
 pub struct DictionaryEntry {
     pub id: i64,
     pub value: String,
+    pub correction: Option<String>,
     pub created_at: i64,
 }
 

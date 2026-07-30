@@ -10,6 +10,8 @@ import type { DictionaryEntry } from "../types";
 export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
   const [entries, setEntries] = useState<DictionaryEntry[]>([]);
   const [value, setValue] = useState("");
+  const [correction, setCorrection] = useState("");
+  const [correctingMisspelling, setCorrectingMisspelling] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const addButtonRef = useRef<HTMLButtonElement>(null);
@@ -30,6 +32,8 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
       if (event.key === "Escape" && !adding) {
         setAddOpen(false);
         setValue("");
+        setCorrection("");
+        setCorrectingMisspelling(false);
       }
     };
     window.addEventListener("keydown", closeOnEscape);
@@ -40,17 +44,26 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     if (adding) return;
     setAddOpen(false);
     setValue("");
+    setCorrection("");
+    setCorrectingMisspelling(false);
   };
 
   const add = async (event: FormEvent) => {
     event.preventDefault();
     const next = value.trim();
-    if (!next) return;
+    const nextCorrection = correctingMisspelling ? correction.trim() : null;
+    if (
+      !next ||
+      (correctingMisspelling &&
+        (!nextCorrection || next.toLocaleLowerCase() === nextCorrection.toLocaleLowerCase()))
+    ) return;
     setAdding(true);
     try {
-      const entry = await api.addDictionary(next);
+      const entry = await api.addDictionary(next, nextCorrection);
       setEntries((current) => [...current, entry].sort((a, b) => a.value.localeCompare(b.value)));
       setValue("");
+      setCorrection("");
+      setCorrectingMisspelling(false);
       setAddOpen(false);
       notify({ kind: "success", message: "Added to dictionary" });
     } catch (error) {
@@ -59,6 +72,11 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
       setAdding(false);
     }
   };
+  const canAdd =
+    Boolean(value.trim()) &&
+    (!correctingMisspelling ||
+      (Boolean(correction.trim()) &&
+        value.trim().toLocaleLowerCase() !== correction.trim().toLocaleLowerCase()));
 
   return (
     <section className="page page--narrow">
@@ -83,13 +101,17 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
           entries.map((entry) => (
             <EditableRow
               key={entry.id}
-              value={entry.value}
+              entry={entry}
               onError={(error) => notify({ kind: "error", message: String(error) })}
-              onSave={async (next) => {
-                await api.updateDictionary(entry.id, next);
+              onSave={async (next, nextCorrection) => {
+                await api.updateDictionary(entry.id, next, nextCorrection);
                 setEntries((current) =>
                   current
-                    .map((item) => item.id === entry.id ? { ...item, value: next } : item)
+                    .map((item) =>
+                      item.id === entry.id
+                        ? { ...item, value: next, correction: nextCorrection }
+                        : item
+                    )
                     .sort((a, b) => a.value.localeCompare(b.value)),
                 );
               }}
@@ -121,16 +143,52 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
 
             <form onSubmit={(event) => void add(event)}>
               <div className="creation-dialog__body">
-                <input
-                  id="dictionary-entry"
-                  aria-label="New vocabulary word"
-                  autoFocus
-                  placeholder="Add a new word"
-                  value={value}
-                  maxLength={120}
-                  disabled={adding}
-                  onChange={(event) => setValue(event.target.value)}
-                />
+                <label className="dictionary-correction-toggle toggle-row">
+                  <div>
+                    <span>Correct a misspelling</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={correctingMisspelling}
+                    disabled={adding}
+                    onChange={(event) => setCorrectingMisspelling(event.target.checked)}
+                  />
+                </label>
+                {correctingMisspelling ? (
+                  <div className="dictionary-correction-fields">
+                    <input
+                      id="dictionary-entry"
+                      aria-label="Misspelling"
+                      autoFocus
+                      placeholder="Misspelling"
+                      value={value}
+                      maxLength={120}
+                      disabled={adding}
+                      onChange={(event) => setValue(event.target.value)}
+                    />
+                    <span aria-hidden="true">→</span>
+                    <input
+                      aria-label="Correct spelling"
+                      placeholder="Correct spelling"
+                      value={correction}
+                      maxLength={120}
+                      disabled={adding}
+                      onChange={(event) => setCorrection(event.target.value)}
+                    />
+                  </div>
+                ) : (
+                  <input
+                    id="dictionary-entry"
+                    aria-label="New vocabulary word"
+                    autoFocus
+                    placeholder="Add a new word"
+                    value={value}
+                    maxLength={120}
+                    disabled={adding}
+                    onChange={(event) => setValue(event.target.value)}
+                  />
+                )}
               </div>
               <footer>
                 <button
@@ -144,7 +202,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
                 <button
                   className="primary-button"
                   type="submit"
-                  disabled={!value.trim() || adding}
+                  disabled={!canAdd || adding}
                 >
                   {adding ? "Adding…" : "Add word"}
                 </button>

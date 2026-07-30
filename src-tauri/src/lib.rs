@@ -42,13 +42,24 @@ fn list_dictionary(state: State<'_, AppState>) -> Result<Vec<DictionaryEntry>> {
 }
 
 #[tauri::command]
-fn add_dictionary(state: State<'_, AppState>, value: String) -> Result<DictionaryEntry> {
-    state.database.add_dictionary(&value)
+fn add_dictionary(
+    state: State<'_, AppState>,
+    value: String,
+    correction: Option<String>,
+) -> Result<DictionaryEntry> {
+    state.database.add_dictionary(&value, correction.as_deref())
 }
 
 #[tauri::command]
-fn update_dictionary(state: State<'_, AppState>, id: i64, value: String) -> Result<()> {
-    state.database.update_dictionary(id, &value)
+fn update_dictionary(
+    state: State<'_, AppState>,
+    id: i64,
+    value: String,
+    correction: Option<String>,
+) -> Result<()> {
+    state
+        .database
+        .update_dictionary(id, &value, correction.as_deref())
 }
 
 #[tauri::command]
