@@ -101,20 +101,7 @@ impl GroqClient {
         Ok(transcript)
     }
 
-    pub async fn clean(
-        &self,
-        api_key: &str,
-        transcript: &str,
-        dictionary: &[String],
-    ) -> Result<String> {
-        let spelling = if dictionary.is_empty() {
-            "No canonical spellings were supplied.".to_string()
-        } else {
-            format!(
-                "Use these exact canonical spellings wherever the speaker intended them: {}",
-                dictionary.join(", ")
-            )
-        };
+    pub async fn clean(&self, api_key: &str, transcript: &str) -> Result<String> {
         let response = self
             .client
             .post(format!("{API_BASE}/chat/completions"))
@@ -126,7 +113,7 @@ impl GroqClient {
                 "reasoning_effort": "none",
                 "messages": [
                     { "role": "system", "content": CLEANUP_PROMPT },
-                    { "role": "user", "content": format!("{spelling}\n\nRaw transcript:\n{transcript}") }
+                    { "role": "user", "content": format!("Raw transcript:\n{transcript}") }
                 ]
             }))
             .send()

@@ -110,7 +110,7 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
             snippet.content
         } else {
             emit_overlay(app, "thinking", Some("Thinking"));
-            state.groq.clean(&api_key, &transcript, &dictionary).await?
+            state.groq.clean(&api_key, &transcript).await?
         };
 
         platform::paste_text(paste_target, &final_text)?;
