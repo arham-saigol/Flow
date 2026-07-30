@@ -113,9 +113,8 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
             state.groq.clean(&api_key, &transcript, &dictionary).await?
         };
 
-        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
-        tokio_sleep(std::time::Duration::from_millis(150)).await;
         platform::paste_text(paste_target, &final_text)?;
+        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
         let history_result = state
             .database
             .insert_history(&final_text, &transcript, recording.duration_ms)
