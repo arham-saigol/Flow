@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Check, Command, Pencil, Trash2, X } from "lucide-react";
+import { Command, Pencil, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import type { ToastData } from "../components/Toast";
@@ -18,52 +18,114 @@ function SnippetRow({
   notify: (data: ToastData) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [trigger, setTrigger] = useState(snippet.trigger);
   const [content, setContent] = useState(snippet.content);
+  const editButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialogFocus(editing, editButtonRef);
 
-  const save = async () => {
-    if (!trigger.trim() || !content.trim()) return;
-    try {
-      await api.updateSnippet(snippet.id, trigger.trim(), content);
-      onChange({ ...snippet, trigger: trigger.trim(), content });
-      setEditing(false);
-    } catch (error) {
-      notify({ kind: "error", message: String(error) });
-    }
-  };
-
-  const cancel = () => {
+  const close = () => {
+    if (saving) return;
     setTrigger(snippet.trigger);
     setContent(snippet.content);
     setEditing(false);
   };
 
+  useEffect(() => {
+    if (!editing) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [editing, saving, snippet]);
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!trigger.trim() || !content.trim()) return;
+    setSaving(true);
+    try {
+      const next = { ...snippet, trigger: trigger.trim(), content };
+      await api.updateSnippet(snippet.id, next.trigger, next.content);
+      onChange(next);
+      setEditing(false);
+    } catch (error) {
+      notify({ kind: "error", message: String(error) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <article className="snippet-row">
-      {editing ? (
-        <div className="snippet-edit">
-          <label>Trigger<input value={trigger} onChange={(e) => setTrigger(e.target.value)} /></label>
-          <label>Content<textarea rows={4} value={content} onChange={(e) => setContent(e.target.value)} /></label>
-        </div>
-      ) : (
-        <div className="snippet-copy">
-          <span>{snippet.trigger}</span>
-          <p>{snippet.content}</p>
+      <div className="snippet-copy">{snippet.trigger}</div>
+      <div className="row-actions">
+        <button
+          ref={editButtonRef}
+          className="icon-button"
+          aria-label={`Edit ${snippet.trigger}`}
+          onClick={() => setEditing(true)}
+        >
+          <Pencil size={15} />
+        </button>
+        <button className="icon-button icon-button--danger" aria-label={`Remove ${snippet.trigger}`} onClick={onDelete}>
+          <Trash2 size={15} />
+        </button>
+      </div>
+
+      {editing && (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => event.target === event.currentTarget && close()}
+        >
+          <section
+            ref={dialogRef}
+            className="creation-dialog creation-dialog--snippet"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={`edit-snippet-${snippet.id}`}
+          >
+            <header>
+              <h2 id={`edit-snippet-${snippet.id}`}>Edit snippet</h2>
+            </header>
+            <form onSubmit={(event) => void save(event)}>
+              <div className="creation-dialog__body snippet-dialog__body">
+                <input
+                  aria-label="Snippet trigger"
+                  autoFocus
+                  value={trigger}
+                  maxLength={120}
+                  disabled={saving}
+                  onChange={(event) => setTrigger(event.target.value)}
+                />
+                <div className="snippet-expansion">
+                  <textarea
+                    aria-label="Snippet expansion"
+                    value={content}
+                    maxLength={4000}
+                    disabled={saving}
+                    onChange={(event) => setContent(event.target.value)}
+                  />
+                  <span>{content.length}/4000</span>
+                </div>
+              </div>
+              <footer>
+                <button className="secondary-button" type="button" disabled={saving} onClick={close}>
+                  Cancel
+                </button>
+                <button
+                  className="primary-button"
+                  type="submit"
+                  disabled={!trigger.trim() || !content.trim() || saving}
+                >
+                  {saving ? "Saving…" : "Save changes"}
+                </button>
+              </footer>
+            </form>
+          </section>
         </div>
       )}
-      <div className="row-actions">
-        {editing ? (
-          <>
-            <button className="icon-button" aria-label="Save" onClick={() => void save()}><Check size={16} /></button>
-            <button className="icon-button" aria-label="Cancel" onClick={cancel}><X size={16} /></button>
-          </>
-        ) : (
-          <>
-            <button className="icon-button" aria-label="Edit" onClick={() => setEditing(true)}><Pencil size={15} /></button>
-            <button className="icon-button icon-button--danger" aria-label="Remove" onClick={onDelete}><Trash2 size={15} /></button>
-          </>
-        )}
-      </div>
     </article>
   );
 }

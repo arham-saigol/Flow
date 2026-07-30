@@ -6,7 +6,7 @@ import {
   BookOpen,
   Command,
   Copy,
-  Gauge,
+  Mic,
   Minus,
   SlidersHorizontal,
   Square,
@@ -22,7 +22,7 @@ import { Snippets } from "./pages/Snippets";
 import type { Page } from "./types";
 
 const navigation = [
-  { id: "dashboard" as const, label: "Dashboard", icon: Gauge },
+  { id: "dashboard" as const, label: "Dictation", icon: Mic },
   { id: "dictionary" as const, label: "Dictionary", icon: BookOpen },
   { id: "snippets" as const, label: "Snippets", icon: Command },
 ];
