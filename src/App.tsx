@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   BookOpen,
   Command,
   Gauge,
+  Minus,
   Settings,
+  Square,
+  X,
 } from "lucide-react";
 import { api } from "./api";
 import { Logo } from "./components/Logo";
@@ -20,6 +25,45 @@ const navigation = [
   { id: "dictionary" as const, label: "Dictionary", icon: BookOpen },
   { id: "snippets" as const, label: "Snippets", icon: Command },
 ];
+
+function TitleBar() {
+  const appWindow = isTauri() ? getCurrentWindow() : null;
+
+  return (
+    <header className="titlebar" data-tauri-drag-region>
+      <div className="titlebar__drag-area" data-tauri-drag-region />
+      {appWindow && (
+        <div className="window-controls" aria-label="Window controls">
+          <button
+            type="button"
+            aria-label="Minimize"
+            title="Minimize"
+            onClick={() => void appWindow.minimize()}
+          >
+            <Minus size={17} strokeWidth={1.6} />
+          </button>
+          <button
+            type="button"
+            aria-label="Maximize"
+            title="Maximize"
+            onClick={() => void appWindow.toggleMaximize()}
+          >
+            <Square size={13} strokeWidth={1.55} />
+          </button>
+          <button
+            type="button"
+            className="window-controls__close"
+            aria-label="Close"
+            title="Close"
+            onClick={() => void appWindow.close()}
+          >
+            <X size={18} strokeWidth={1.55} />
+          </button>
+        </div>
+      )}
+    </header>
+  );
+}
 
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
@@ -41,6 +85,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!isTauri()) {
+      return () => {
+        if (toastTimer.current !== null) {
+          window.clearTimeout(toastTimer.current);
+        }
+      };
+    }
+
     void api
       .settings()
       .then((settings) => setKeybind(settings.keybind))
@@ -67,41 +119,44 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar__brand">
-          <Logo />
-        </div>
-        <nav aria-label="Primary">
-          {navigation.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              className={page === id ? "active" : ""}
-              onClick={() => setPage(id)}
-            >
-              <Icon size={18} strokeWidth={1.75} />
-              <span>{label}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar__bottom">
-          <button onClick={() => setSettingsOpen(true)}>
-            <Settings size={18} strokeWidth={1.75} />
-            <span>Settings</span>
-          </button>
-          <div className="shortcut-hint">
-            <span>Start dictating</span>
-            <kbd>{keybind}</kbd>
+      <TitleBar />
+      <div className="app-frame">
+        <aside className="sidebar">
+          <div className="sidebar__brand">
+            <Logo />
           </div>
-        </div>
-      </aside>
+          <nav aria-label="Primary">
+            {navigation.map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                className={page === id ? "active" : ""}
+                onClick={() => setPage(id)}
+              >
+                <Icon size={18} strokeWidth={1.75} />
+                <span>{label}</span>
+              </button>
+            ))}
+          </nav>
+          <div className="sidebar__bottom">
+            <button onClick={() => setSettingsOpen(true)}>
+              <Settings size={18} strokeWidth={1.75} />
+              <span>Settings</span>
+            </button>
+            <div className="shortcut-hint">
+              <span>Start dictating</span>
+              <kbd>{keybind}</kbd>
+            </div>
+          </div>
+        </aside>
 
-      <main className="main-content">
-        {page === "dashboard" && (
-          <Dashboard version={dashboardVersion} keybind={keybind} notify={notify} />
-        )}
-        {page === "dictionary" && <Dictionary notify={notify} />}
-        {page === "snippets" && <Snippets notify={notify} />}
-      </main>
+        <main className="main-content">
+          {page === "dashboard" && (
+            <Dashboard version={dashboardVersion} keybind={keybind} notify={notify} />
+          )}
+          {page === "dictionary" && <Dictionary notify={notify} />}
+          {page === "snippets" && <Snippets notify={notify} />}
+        </main>
+      </div>
 
       {settingsOpen && (
         <SettingsModal

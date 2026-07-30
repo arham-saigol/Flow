@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
 import { Clipboard, Clock3, History as HistoryIcon, MessageSquareText, Timer, Type } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -49,6 +50,11 @@ export function Dashboard({
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!isTauri()) {
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     api
       .dashboard()
