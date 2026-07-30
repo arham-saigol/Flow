@@ -73,7 +73,7 @@ export function Dashboard({
     <section className="page">
       <header className="page-header">
         <div>
-          <h1>Dashboard</h1>
+          <h1>Dictation</h1>
           <p>Everything you’ve said, made clearer.</p>
         </div>
       </header>
@@ -87,16 +87,7 @@ export function Dashboard({
         ))}
       </div>
 
-      <section className="section-block history-section">
-        <div className="section-heading">
-          <div>
-            <h2>History</h2>
-            <p>Click any entry to copy the complete text.</p>
-          </div>
-          {data.history.length > 0 && (
-            <span className="count-pill">{data.history.length}</span>
-          )}
-        </div>
+      <section className="section-block history-section" aria-label="Dictation history">
         {data.history.length === 0 ? (
           <EmptyState
             title="Your words will land here"
@@ -115,16 +106,10 @@ export function Dashboard({
                     .catch((error) => notify({ kind: "error", message: String(error) }));
                 }}
               >
-                <div className="history-row__body">
-                  <p>{entry.text}</p>
-                  <div>
-                    <span>{relativeTime(entry.created_at)}</span>
-                    <i />
-                    <span>{entry.word_count} words</span>
-                    <i />
-                    <span>{formatDuration(entry.duration_ms)}</span>
-                  </div>
-                </div>
+                <time dateTime={new Date(entry.created_at * 1000).toISOString()}>
+                  {relativeTime(entry.created_at)}
+                </time>
+                <p title={entry.text}>{entry.text}</p>
               </button>
             ))}
           </div>

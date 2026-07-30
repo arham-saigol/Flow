@@ -193,13 +193,11 @@ kbd {
 .empty-state h3 { margin: 0 0 6px; font: 600 14px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
 .empty-state p { max-width: 315px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .history-list { display: grid; }
-.history-row { width: 100%; display: flex; align-items: flex-start; padding: 16px 22px; text-align: left; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; cursor: pointer; }
+.history-row { width: 100%; min-width: 0; display: grid; grid-template-columns: 84px minmax(0, 1fr); align-items: center; gap: 18px; padding: 16px 22px; text-align: left; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; cursor: pointer; }
 .history-row:last-child { border-bottom: 0; }
 .history-row:hover { background: rgba(55, 53, 48, .035); }
-.history-row__body { min-width: 0; }
-.history-row__body p { margin: 0 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-.history-row__body div { display: flex; align-items: center; gap: 8px; color: var(--quiet); font-size: 10px; }
-.history-row__body i { width: 2px; height: 2px; border-radius: 50%; background: #b7b0a6; }
+.history-row time { color: var(--muted); font-size: 12px; }
+.history-row p { min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
 
 input, textarea, select {
   width: 100%;
