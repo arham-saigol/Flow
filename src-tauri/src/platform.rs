@@ -343,10 +343,12 @@ pub fn prepare_overlay(app: &AppHandle, target: TargetWindow) -> Result<()> {
         .ok_or_else(|| FlowError::Windows("The target monitor is unavailable.".into()))?;
     let work_area = monitor.work_area();
     let scale = monitor.scale_factor();
-    let width = (190.0 * scale).round() as i32;
-    let height = (88.0 * scale).round() as i32;
-    let bottom_margin = (28.0 * scale).round() as i32;
-    let x = work_area.position.x + (work_area.size.width as i32 - width) / 2;
+    let width = (104.0 * scale).round() as i32;
+    let height = (50.0 * scale).round() as i32;
+    let bottom_margin = (8.0 * scale).round() as i32;
+    // Bias an unavoidable half-pixel to the right instead of leaving the
+    // overlay looking one physical pixel left of center.
+    let x = work_area.position.x + (work_area.size.width as i32 - width + 1) / 2;
     let y = work_area.position.y + work_area.size.height as i32 - height - bottom_margin;
     overlay
         .set_position(tauri::PhysicalPosition::new(x, y))
@@ -378,18 +380,18 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
         let target_hwnd = HWND(target.hwnd as *mut _);
         if target.hwnd == 0 || !IsWindow(target_hwnd).as_bool() {
             return Err(FlowError::Windows(
-                "The application you started dictating in is no longer open.".into(),
+                "The application selected when dictation ended is no longer open.".into(),
             ));
         }
         if !SetForegroundWindow(target_hwnd).as_bool() {
             return Err(FlowError::Windows(
-                "Flow could not return focus to the application where dictation started.".into(),
+                "Flow could not focus the application selected when dictation ended.".into(),
             ));
         }
         thread::sleep(Duration::from_millis(24));
         if GetForegroundWindow().0 != target_hwnd.0 {
             return Err(FlowError::Windows(
-                "The application where dictation started did not regain focus.".into(),
+                "The application selected when dictation ended did not gain focus.".into(),
             ));
         }
 
@@ -452,6 +454,8 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
 }
 
 unsafe fn send_unicode(text: &str) -> Result<()> {
+    const INPUTS_PER_CHUNK: usize = 128;
+
     let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
@@ -472,8 +476,19 @@ unsafe fn send_unicode(text: &str) -> Result<()> {
             }
         }
     }
-    for chunk in inputs.chunks(64) {
-        send_inputs(chunk)?;
+
+    for chunk in inputs.chunks(INPUTS_PER_CHUNK) {
+        let mut sent = 0;
+        while sent < chunk.len() {
+            let inserted = SendInput(&chunk[sent..], size_of::<INPUT>() as i32) as usize;
+            if inserted == 0 {
+                return Err(FlowError::Windows(format!(
+                    "Windows accepted {sent} of {} keyboard input events in the current chunk.",
+                    chunk.len()
+                )));
+            }
+            sent += inserted;
+        }
     }
     Ok(())
 }

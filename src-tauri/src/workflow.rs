@@ -23,7 +23,7 @@ pub async fn toggle_from_tray(app: &AppHandle) {
 async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.recorder.is_recording() {
-        stop_and_process(app).await;
+        stop_and_process_with_target(app, target).await;
     } else if !state.busy.load(Ordering::Acquire) {
         if let Err(error) = start_with_target(app, target) {
             report_error(app, error);
@@ -49,11 +49,11 @@ fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) ->
         let settings = state.database.settings(true)?;
         let target = target.unwrap_or_else(platform::capture_target);
         platform::prepare_overlay(app, target)?;
+        emit_overlay(app, "recording", None);
         state
             .recorder
             .start(app.clone(), &settings.microphone_id, target)?;
         platform::set_recording(true);
-        emit_overlay(app, "recording", None);
         Ok(())
     })();
     if result.is_err() {
@@ -63,6 +63,10 @@ fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) ->
 }
 
 pub async fn stop_and_process(app: &AppHandle) {
+    stop_and_process_with_target(app, Some(platform::capture_target())).await;
+}
+
+async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.processing.swap(true, Ordering::AcqRel) {
         return;
@@ -77,7 +81,10 @@ pub async fn stop_and_process(app: &AppHandle) {
             return;
         }
     };
-    emit_overlay(app, "analysing", Some("Analysing"));
+    // Capture the destination when dictation is stopped. Processing may take
+    // several seconds, during which the foreground window can change again.
+    let paste_target = target.unwrap_or(recording.target);
+    emit_overlay(app, "analysing", Some("Analyzing"));
 
     let result = async {
         let api_key = credentials::read_api_key()?;
@@ -106,7 +113,8 @@ pub async fn stop_and_process(app: &AppHandle) {
             state.groq.clean(&api_key, &transcript, &dictionary).await?
         };
 
-        platform::paste_text(recording.target, &final_text)?;
+        platform::paste_text(paste_target, &final_text)?;
+        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
         let history_result = state
             .database
             .insert_history(&final_text, &transcript, recording.duration_ms)
@@ -117,7 +125,7 @@ pub async fn stop_and_process(app: &AppHandle) {
 
     match result {
         Ok(history_error) => {
-            hide_overlay(app);
+            dismiss_overlay(app, None).await;
             let _ = app.emit(
                 "dictation-complete",
                 MessagePayload {
@@ -149,7 +157,15 @@ pub fn cancel(app: &AppHandle) {
     if state.recorder.cancel().is_ok() {
         platform::set_recording(false);
         state.busy.store(false, Ordering::Release);
-        hide_overlay(app);
+        let _ = app.emit_to("overlay", "overlay-dismiss", ());
+        let generation = ERROR_GENERATION.load(Ordering::Acquire);
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio_sleep(std::time::Duration::from_millis(130)).await;
+            if ERROR_GENERATION.load(Ordering::Acquire) == generation {
+                hide_overlay(&app_clone);
+            }
+        });
     }
 }
 
@@ -175,9 +191,7 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
     tauri::async_runtime::spawn(async move {
         tokio_sleep(std::time::Duration::from_secs(4)).await;
         if ERROR_GENERATION.load(Ordering::Acquire) == generation {
-            if let Some(window) = app_clone.get_webview_window("overlay") {
-                let _ = window.hide();
-            }
+            dismiss_overlay(&app_clone, Some(generation)).await;
         }
     });
 }
@@ -196,6 +210,17 @@ fn emit_overlay(app: &AppHandle, phase: &str, message: Option<&str>) {
 fn hide_overlay(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.hide();
+    }
+}
+
+async fn dismiss_overlay(app: &AppHandle, expected_generation: Option<u64>) {
+    let _ = app.emit_to("overlay", "overlay-dismiss", ());
+    tokio_sleep(std::time::Duration::from_millis(130)).await;
+    if expected_generation
+        .map(|generation| ERROR_GENERATION.load(Ordering::Acquire) == generation)
+        .unwrap_or(true)
+    {
+        hide_overlay(app);
     }
 }
 
