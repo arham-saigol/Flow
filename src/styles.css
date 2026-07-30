@@ -96,7 +96,7 @@ button:focus-visible {
 }
 .logo svg { display: block; flex: 0 0 auto; fill: currentcolor; }
 .logo-symbol { width: 24px; height: 24px; }
-.logo-wordmark { width: 70px; height: auto; }
+.logo-wordmark { width: 64px; height: auto; }
 .sidebar nav { display: grid; gap: 5px; }
 .sidebar nav button, .sidebar__bottom > button {
   width: 100%;
