@@ -23,7 +23,7 @@ html, body, #root { width: 100%; min-width: 740px; height: 100%; margin: 0; over
 body { user-select: none; }
 button, input, textarea, select { font: inherit; }
 button { color: inherit; }
-button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+button:focus-visible {
   outline: 2px solid rgba(33, 31, 27, 0.4);
   outline-offset: 2px;
 }
@@ -201,7 +201,6 @@ kbd {
 .history-row__body div { display: flex; align-items: center; gap: 8px; color: var(--quiet); font-size: 10px; }
 .history-row__body i { width: 2px; height: 2px; border-radius: 50%; background: #b7b0a6; }
 
-.add-form { display: flex; gap: 10px; }
 input, textarea, select {
   width: 100%;
   color: var(--text);
@@ -213,9 +212,8 @@ input, textarea, select {
   transition: border-color 120ms, box-shadow 120ms;
 }
 input::placeholder, textarea::placeholder { color: #aaa297; }
-input:focus, textarea:focus, select:focus { border-color: #8f8980; box-shadow: 0 0 0 3px rgba(33, 31, 27, .09); }
+input:focus, textarea:focus, select:focus { border-color: #77736c; box-shadow: none; }
 textarea { resize: vertical; line-height: 1.5; }
-.add-form input { height: 43px; }
 .primary-button, .secondary-button {
   height: 41px;
   padding: 0 16px;
@@ -236,6 +234,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .secondary-button.compact { height: 35px; padding: 0 12px; align-self: flex-start; }
 .helper-copy { margin: 12px 3px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .flat-list { margin-top: 21px; }
+.dictionary-list { margin-top: 0; }
 .flat-row { min-height: 53px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px 7px 17px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
 .flat-row:last-child { border-bottom: 0; }
 .flat-row input { height: 36px; padding: 7px 9px; }
@@ -281,6 +280,39 @@ textarea { resize: vertical; line-height: 1.5; }
 .toggle-row input:checked { background: var(--accent); }
 .toggle-row input:checked::after { transform: translateX(16px); }
 .settings-modal > footer { padding: 15px 25px; display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--border); background: #f0ece5; }
+
+.dictionary-dialog {
+  width: min(470px, calc(100vw - 50px));
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid #d8d4cb;
+  border-radius: 15px;
+  box-shadow: 0 26px 70px rgba(37, 34, 29, .2);
+  overflow: hidden;
+}
+.dictionary-dialog > header {
+  padding: 21px 23px 18px;
+}
+.dictionary-dialog > header h2 {
+  margin: 0;
+  font: 700 20px/1.15 "Segoe UI Variable Display", "Segoe UI", sans-serif;
+  letter-spacing: -.5px;
+}
+.dictionary-dialog__body {
+  padding: 10px 23px 22px;
+  display: grid;
+  gap: 11px;
+}
+.dictionary-dialog__body input {
+  height: 42px;
+  border-color: #c9c4ba;
+}
+.dictionary-dialog footer {
+  padding: 0 23px 20px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+}
 
 .toast { position: fixed; z-index: 80; right: 25px; bottom: 24px; max-width: 360px; min-height: 42px; padding: 0 8px 0 13px; display: flex; align-items: center; gap: 9px; color: #fdfaf6; background: #2c2a26; border-radius: 10px; box-shadow: var(--shadow); font-size: 12px; animation: toast-in 180ms ease-out; }
 .toast--success > svg { color: #f3f1ed; }

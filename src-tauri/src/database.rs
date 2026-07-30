@@ -276,10 +276,21 @@ impl Database {
     }
 
     pub fn update_dictionary(&self, id: i64, value: &str) -> Result<()> {
-        self.conn()?.execute(
-            "UPDATE dictionary SET value = ?1 WHERE id = ?2",
-            params![value.trim(), id],
-        )?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(FlowError::Message("Enter a word or name.".into()));
+        }
+        self.conn()?
+            .execute(
+                "UPDATE dictionary SET value = ?1 WHERE id = ?2",
+                params![value, id],
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::SqliteFailure(ref failure, _) if failure.extended_code == 2067 => {
+                    FlowError::Message("That dictionary entry already exists.".into())
+                }
+                other => FlowError::Database(other),
+            })?;
         Ok(())
     }
 
