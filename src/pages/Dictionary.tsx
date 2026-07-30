@@ -1,9 +1,10 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { BookOpen } from "lucide-react";
 import { api } from "../api";
 import { EditableRow } from "../components/EditableRow";
 import { EmptyState } from "../components/EmptyState";
 import type { ToastData } from "../components/Toast";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { DictionaryEntry } from "../types";
 
 export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
@@ -11,6 +12,8 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
   const [value, setValue] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialogFocus(addOpen, addButtonRef);
 
   const load = () =>
     api.dictionary().then(setEntries).catch((error) =>
@@ -64,7 +67,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
           <h1>Dictionary</h1>
           <p>Teach Flow the exact spelling of words and names it gets wrong.</p>
         </div>
-        <button className="primary-button" type="button" onClick={() => setAddOpen(true)}>
+        <button ref={addButtonRef} className="primary-button" type="button" onClick={() => setAddOpen(true)}>
           Add new
         </button>
       </header>
@@ -106,6 +109,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
           onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
         >
           <section
+            ref={dialogRef}
             className="creation-dialog creation-dialog--vocabulary"
             role="dialog"
             aria-modal="true"

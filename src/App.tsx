@@ -5,6 +5,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   BookOpen,
   Command,
+  Copy,
   Gauge,
   Minus,
   SlidersHorizontal,
@@ -28,6 +29,32 @@ const navigation = [
 
 function TitleBar() {
   const appWindow = isTauri() ? getCurrentWindow() : null;
+  const [maximized, setMaximized] = useState(false);
+
+  useEffect(() => {
+    if (!appWindow) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    const refreshMaximized = async () => {
+      const next = await appWindow.isMaximized();
+      if (!disposed) setMaximized(next);
+    };
+
+    void refreshMaximized();
+    void appWindow.onResized(refreshMaximized).then((stopListening) => {
+      if (disposed) {
+        stopListening();
+      } else {
+        unlisten = stopListening;
+      }
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   return (
     <header className="titlebar" data-tauri-drag-region>
@@ -44,11 +71,13 @@ function TitleBar() {
           </button>
           <button
             type="button"
-            aria-label="Maximize"
-            title="Maximize"
+            aria-label={maximized ? "Restore" : "Maximize"}
+            title={maximized ? "Restore" : "Maximize"}
             onClick={() => void appWindow.toggleMaximize()}
           >
-            <Square size={13} strokeWidth={1.55} />
+            {maximized
+              ? <Copy size={13} strokeWidth={1.55} />
+              : <Square size={13} strokeWidth={1.55} />}
           </button>
           <button
             type="button"

@@ -1,8 +1,9 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Check, Command, Pencil, Trash2, X } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import type { ToastData } from "../components/Toast";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { Snippet } from "../types";
 
 function SnippetRow({
@@ -73,6 +74,8 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
   const [content, setContent] = useState("");
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useDialogFocus(addOpen, addButtonRef);
 
   useEffect(() => {
     api.snippets().then(setSnippets).catch((error) => notify({ kind: "error", message: String(error) }));
@@ -123,7 +126,7 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
           <h1>Snippets</h1>
           <p>Say an exact trigger to paste its content instantly.</p>
         </div>
-        <button className="primary-button" type="button" onClick={() => setAddOpen(true)}>
+        <button ref={addButtonRef} className="primary-button" type="button" onClick={() => setAddOpen(true)}>
           Add new
         </button>
       </header>
@@ -158,6 +161,7 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
           onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
         >
           <section
+            ref={dialogRef}
             className="creation-dialog creation-dialog--snippet"
             role="dialog"
             aria-modal="true"

@@ -65,8 +65,8 @@ export function Dashboard({
   const cards = [
     { label: "Total words dictated", value: number.format(data.total_words_dictated) },
     { label: "Words per minute", value: number.format(data.average_words_per_minute) },
-    { label: "Time dictated", value: formatDuration(data.time_dictated_ms) },
-    { label: "Estimated time saved", value: formatDuration(data.estimated_saved_ms) },
+    { label: "Time dictated this week", value: formatDuration(data.time_dictated_ms) },
+    { label: "Estimated time saved this week", value: formatDuration(data.estimated_saved_ms) },
   ];
 
   return (
