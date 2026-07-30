@@ -106,7 +106,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
           onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
         >
           <section
-            className="dictionary-dialog"
+            className="creation-dialog creation-dialog--vocabulary"
             role="dialog"
             aria-modal="true"
             aria-labelledby="add-dictionary-title"
@@ -116,7 +116,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
             </header>
 
             <form onSubmit={(event) => void add(event)}>
-              <div className="dictionary-dialog__body">
+              <div className="creation-dialog__body">
                 <input
                   id="dictionary-entry"
                   aria-label="New vocabulary word"

@@ -243,10 +243,8 @@ textarea { resize: vertical; line-height: 1.5; }
 .icon-button:hover { color: var(--text); background: var(--panel-strong); }
 .icon-button--danger:hover { color: #211f1b; background: #e8e5df; }
 
-.snippet-form { padding: 20px; display: grid; gap: 15px; background: var(--panel); border: 1px solid var(--border-soft); border-radius: 13px; }
-.snippet-form label, .snippet-edit label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
-.snippet-form > div { display: flex; justify-content: flex-end; }
-.snippets-list { margin-top: 21px; }
+.snippet-edit label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.snippets-list { margin-top: 0; }
 .snippet-row { display: flex; align-items: flex-start; gap: 15px; padding: 17px 12px 17px 20px; border-bottom: 1px solid var(--border-soft); }
 .snippet-row:last-child { border-bottom: 0; }
 .snippet-copy, .snippet-edit { flex: 1; min-width: 0; }
@@ -281,8 +279,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .toggle-row input:checked::after { transform: translateX(16px); }
 .settings-modal > footer { padding: 15px 25px; display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid var(--border); background: #f0ece5; }
 
-.dictionary-dialog {
-  width: min(470px, calc(100vw - 50px));
+.creation-dialog {
   color: var(--text);
   background: var(--bg);
   border: 1px solid #d8d4cb;
@@ -290,28 +287,59 @@ textarea { resize: vertical; line-height: 1.5; }
   box-shadow: 0 26px 70px rgba(37, 34, 29, .2);
   overflow: hidden;
 }
-.dictionary-dialog > header {
+.creation-dialog--vocabulary { width: min(470px, calc(100vw - 50px)); }
+.creation-dialog--snippet { width: min(650px, calc(100vw - 50px)); }
+.creation-dialog > header {
   padding: 21px 23px 18px;
 }
-.dictionary-dialog > header h2 {
+.creation-dialog > header h2 {
   margin: 0;
   font: 700 20px/1.15 "Segoe UI Variable Display", "Segoe UI", sans-serif;
   letter-spacing: -.5px;
 }
-.dictionary-dialog__body {
+.creation-dialog__body {
   padding: 10px 23px 22px;
   display: grid;
   gap: 11px;
 }
-.dictionary-dialog__body input {
+.creation-dialog--vocabulary .creation-dialog__body input {
   height: 42px;
   border-color: #c9c4ba;
 }
-.dictionary-dialog footer {
+.creation-dialog footer {
   padding: 0 23px 20px;
   display: flex;
   justify-content: flex-end;
   gap: 9px;
+}
+.snippet-dialog__body {
+  padding-top: 4px;
+  gap: 11px;
+}
+.snippet-dialog__body > input {
+  height: 42px;
+  border-color: #c9c4ba;
+}
+.snippet-expansion { position: relative; }
+.snippet-expansion textarea {
+  min-height: 210px;
+  padding: 15px 16px 35px;
+  border-color: #c9c4ba;
+  resize: none;
+}
+.creation-dialog input:focus,
+.creation-dialog textarea:focus {
+  border-color: #77736c;
+  outline: none;
+  box-shadow: none;
+}
+.snippet-expansion span {
+  position: absolute;
+  right: 11px;
+  bottom: 11px;
+  color: var(--quiet);
+  font-size: 10px;
+  pointer-events: none;
 }
 
 .toast { position: fixed; z-index: 80; right: 25px; bottom: 24px; max-width: 360px; min-height: 42px; padding: 0 8px 0 13px; display: flex; align-items: center; gap: 9px; color: #fdfaf6; background: #2c2a26; border-radius: 10px; box-shadow: var(--shadow); font-size: 12px; animation: toast-in 180ms ease-out; }
