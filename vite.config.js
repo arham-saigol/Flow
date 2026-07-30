@@ -4,6 +4,8 @@ export default defineConfig({
     plugins: [react()],
     clearScreen: false,
     server: {
+        host: "127.0.0.1",
+        allowedHosts: ["desktop-00vtaaa.tail5bb70e.ts.net"],
         port: 1420,
         strictPort: true,
         watch: {
