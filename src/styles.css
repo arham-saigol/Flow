@@ -391,6 +391,7 @@ textarea::-webkit-scrollbar {
 .toggle-row span { display: block; margin-bottom: 3px; font-size: 12px; font-weight: 600; }
 .toggle-row p { margin: 0; color: var(--muted); font-size: 10px; }
 .toggle-row input { appearance: none; width: 36px; height: 20px; padding: 0; flex: 0 0 auto; border: 0; border-radius: 20px; background: #c9c2b8; cursor: pointer; position: relative; }
+.toggle-row input:focus-visible { outline: 2px solid rgba(33, 31, 27, 0.4); outline-offset: 2px; }
 .toggle-row input::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #faf8f3; border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.16); transition: 150ms; }
 .toggle-row input:checked { background: var(--accent); }
 .toggle-row input:checked::after { transform: translateX(16px); }
