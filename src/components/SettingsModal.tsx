@@ -103,6 +103,7 @@ export function SettingsModal({
   };
 
   const captureHotkey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!capturingHotkey) return;
     event.preventDefault();
     event.stopPropagation();
     if (event.key === "Escape") {
