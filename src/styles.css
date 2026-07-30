@@ -208,10 +208,11 @@ input, textarea, select {
   transition: border-color 120ms, box-shadow 120ms;
 }
 input::placeholder, textarea::placeholder { color: #aaa297; }
+input:focus, textarea:focus, select:focus,
 input:focus-visible, textarea:focus-visible, select:focus-visible {
   border-color: #77736c;
-  outline: 2px solid rgba(33, 31, 27, 0.4);
-  outline-offset: 1px;
+  outline: none;
+  box-shadow: none;
 }
 textarea { resize: vertical; line-height: 1.5; }
 .primary-button, .secondary-button {
@@ -244,12 +245,10 @@ textarea { resize: vertical; line-height: 1.5; }
 .icon-button:hover { color: var(--text); background: var(--panel-strong); }
 .icon-button--danger:hover { color: #211f1b; background: #e8e5df; }
 
-.snippet-edit label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .snippets-list { margin-top: 0; }
 .snippet-row { min-height: 53px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px 7px 17px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
 .snippet-row:last-child { border-bottom: 0; }
-.snippet-copy, .snippet-edit { flex: 1; min-width: 0; }
-.snippet-edit { display: grid; gap: 10px; }
+.snippet-copy { flex: 1; min-width: 0; }
 
 .modal-backdrop { position: fixed; z-index: 50; inset: 0; display: grid; place-items: center; padding: 25px; background: rgba(43, 39, 33, .28); backdrop-filter: blur(4px); }
 .settings-modal {
@@ -372,6 +371,10 @@ textarea::-webkit-scrollbar {
 }
 .hotkey-capture svg { color: var(--muted); }
 .hotkey-capture:hover { border-color: #c6c1b7; }
+.hotkey-capture:focus-visible {
+  border-color: #77736c;
+  outline: none;
+}
 .hotkey-capture.is-capturing {
   border-color: #77736c;
   background: #f0ede6;
@@ -446,11 +449,6 @@ textarea::-webkit-scrollbar {
   padding: 15px 16px 35px;
   border-color: #c9c4ba;
   resize: none;
-}
-.creation-dialog input:focus,
-.creation-dialog textarea:focus {
-  border-color: #77736c;
-  box-shadow: none;
 }
 .snippet-expansion span {
   position: absolute;
