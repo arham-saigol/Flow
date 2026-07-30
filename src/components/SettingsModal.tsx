@@ -143,9 +143,13 @@ export function SettingsModal({
         </header>
 
         <div className="settings-layout">
-          <nav className="settings-tabs" aria-label="Settings sections">
+          <nav className="settings-tabs" aria-label="Settings sections" role="tablist">
             <button
+              id="settings-general-tab"
               type="button"
+              role="tab"
+              aria-selected={activeTab === "general"}
+              aria-controls="settings-panel"
               className={activeTab === "general" ? "active" : ""}
               onClick={() => setActiveTab("general")}
             >
@@ -153,7 +157,11 @@ export function SettingsModal({
               <span>General</span>
             </button>
             <button
+              id="settings-transcription-tab"
               type="button"
+              role="tab"
+              aria-selected={activeTab === "transcription"}
+              aria-controls="settings-panel"
               className={activeTab === "transcription" ? "active" : ""}
               onClick={() => setActiveTab("transcription")}
             >
@@ -162,7 +170,12 @@ export function SettingsModal({
             </button>
           </nav>
 
-          <div className="settings-pane">
+          <div
+            id="settings-panel"
+            className="settings-pane"
+            role="tabpanel"
+            aria-labelledby={`settings-${activeTab}-tab`}
+          >
             {activeTab === "general" ? (
               <>
                 <div className="settings-pane__heading">

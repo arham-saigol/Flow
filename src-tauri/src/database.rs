@@ -15,6 +15,17 @@ pub struct Database {
     connection: Mutex<Connection>,
 }
 
+fn map_unique_violation(error: rusqlite::Error, message: &str) -> FlowError {
+    match error {
+        rusqlite::Error::SqliteFailure(ref failure, _)
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            FlowError::Message(message.into())
+        }
+        other => FlowError::Database(other),
+    }
+}
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
@@ -195,7 +206,6 @@ impl Database {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        // Typical speech is ~150 wpm and comfortable typing ~40 wpm.
         let average_words_per_minute = if total_duration > 0 {
             total_words
                 .saturating_mul(60_000)
@@ -204,7 +214,9 @@ impl Database {
         } else {
             0
         };
-        let typing_ms = weekly_words.saturating_mul(1_500);
+        // Comfortable typing is ~40 wpm, or 1.5 seconds per word.
+        const TYPING_MS_PER_WORD: i64 = 1_500;
+        let typing_ms = weekly_words.saturating_mul(TYPING_MS_PER_WORD);
         Ok(DashboardData {
             total_words_dictated: total_words,
             average_words_per_minute,
@@ -224,10 +236,11 @@ impl Database {
             params![text, raw_text, word_count, duration_ms, Self::now()],
         )?;
         transaction.execute(
-            "UPDATE aggregate_stats
-             SET total_words = total_words + ?1,
-                 total_duration_ms = total_duration_ms + ?2
-             WHERE id = 1",
+            "INSERT INTO aggregate_stats(id, total_words, total_duration_ms)
+             VALUES(1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET
+                 total_words = total_words + excluded.total_words,
+                 total_duration_ms = total_duration_ms + excluded.total_duration_ms",
             params![word_count, duration_ms],
         )?;
         transaction.commit()?;
@@ -262,12 +275,7 @@ impl Database {
             "INSERT INTO dictionary(value, created_at) VALUES(?1, ?2)",
             params![value, now],
         )
-        .map_err(|error| match error {
-            rusqlite::Error::SqliteFailure(ref failure, _) if failure.extended_code == 2067 => {
-                FlowError::Message("That dictionary entry already exists.".into())
-            }
-            other => FlowError::Database(other),
-        })?;
+        .map_err(|error| map_unique_violation(error, "That dictionary entry already exists."))?;
         Ok(DictionaryEntry {
             id: conn.last_insert_rowid(),
             value: value.into(),
@@ -285,11 +293,8 @@ impl Database {
                 "UPDATE dictionary SET value = ?1 WHERE id = ?2",
                 params![value, id],
             )
-            .map_err(|error| match error {
-                rusqlite::Error::SqliteFailure(ref failure, _) if failure.extended_code == 2067 => {
-                    FlowError::Message("That dictionary entry already exists.".into())
-                }
-                other => FlowError::Database(other),
+            .map_err(|error| {
+                map_unique_violation(error, "That dictionary entry already exists.")
             })?;
         Ok(())
     }
@@ -335,12 +340,7 @@ impl Database {
             "INSERT INTO snippets(trigger, content, created_at) VALUES(?1, ?2, ?3)",
             params![trigger, content, now],
         )
-        .map_err(|error| match error {
-            rusqlite::Error::SqliteFailure(ref failure, _) if failure.extended_code == 2067 => {
-                FlowError::Message("That snippet trigger already exists.".into())
-            }
-            other => FlowError::Database(other),
-        })?;
+        .map_err(|error| map_unique_violation(error, "That snippet trigger already exists."))?;
         Ok(Snippet {
             id: conn.last_insert_rowid(),
             trigger: trigger.into(),

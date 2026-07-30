@@ -212,7 +212,11 @@ input, textarea, select {
   transition: border-color 120ms, box-shadow 120ms;
 }
 input::placeholder, textarea::placeholder { color: #aaa297; }
-input:focus, textarea:focus, select:focus { border-color: #77736c; box-shadow: none; }
+input:focus-visible, textarea:focus-visible, select:focus-visible {
+  border-color: #77736c;
+  outline: 2px solid rgba(33, 31, 27, 0.4);
+  outline-offset: 1px;
+}
 textarea { resize: vertical; line-height: 1.5; }
 .primary-button, .secondary-button {
   height: 38px;
@@ -440,7 +444,6 @@ textarea { resize: vertical; line-height: 1.5; }
 .creation-dialog input:focus,
 .creation-dialog textarea:focus {
   border-color: #77736c;
-  outline: none;
   box-shadow: none;
 }
 .snippet-expansion span {
