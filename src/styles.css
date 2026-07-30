@@ -215,23 +215,24 @@ input::placeholder, textarea::placeholder { color: #aaa297; }
 input:focus, textarea:focus, select:focus { border-color: #77736c; box-shadow: none; }
 textarea { resize: vertical; line-height: 1.5; }
 .primary-button, .secondary-button {
-  height: 41px;
-  padding: 0 16px;
+  height: 38px;
+  padding: 0 15px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  border-radius: 9px;
+  gap: 6px;
+  border-radius: 8px;
   font-weight: 600;
-  font-size: 13px;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
 }
-.primary-button { color: #fbfaf7; background: var(--accent); border: 1px solid var(--accent); box-shadow: 0 2px 6px rgba(24, 23, 21, .14); }
+.primary-button { color: #fbfaf7; background: var(--accent); border: 1px solid var(--accent); box-shadow: 0 1px 3px rgba(24, 23, 21, .12); }
 .primary-button:hover { background: var(--accent-dark); }
 .primary-button:disabled, .secondary-button:disabled { cursor: default; opacity: .48; }
 .secondary-button { background: var(--panel); border: 1px solid var(--border); }
 .secondary-button:hover { background: #f3efe8; }
-.secondary-button.compact { height: 35px; padding: 0 12px; align-self: flex-start; }
+.secondary-button.compact { height: 34px; padding: 0 11px; align-self: flex-start; font-size: 13px; }
 .helper-copy { margin: 12px 3px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .flat-list { margin-top: 21px; }
 .dictionary-list { margin-top: 0; }
