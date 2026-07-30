@@ -17,10 +17,58 @@ export default function Overlay() {
   const [isClosing, setIsClosing] = useState(false);
   const targetLevel = useRef(0);
   const displayedLevel = useRef(0);
+  const lastPublishedLevel = useRef(0);
+  const lastPublishedProgress = useRef(0);
   const processingStartedAt = useRef<number | null>(null);
   const processingComplete = useRef(false);
 
   useEffect(() => {
+    let animationFrame = 0;
+    const publishProgress = (nextProgress: number) => {
+      if (nextProgress !== lastPublishedProgress.current) {
+        lastPublishedProgress.current = nextProgress;
+        setProgress(nextProgress);
+      }
+    };
+    const animate = () => {
+      animationFrame = 0;
+      const difference = targetLevel.current - displayedLevel.current;
+      const smoothing = difference > 0 ? 0.34 : 0.16;
+      displayedLevel.current += difference * smoothing;
+      if (Math.abs(difference) < 0.002) {
+        displayedLevel.current = targetLevel.current;
+      }
+      if (displayedLevel.current !== lastPublishedLevel.current) {
+        lastPublishedLevel.current = displayedLevel.current;
+        setLevel(displayedLevel.current);
+      }
+
+      const isProcessing =
+        processingStartedAt.current !== null && !processingComplete.current;
+      if (isProcessing) {
+        const elapsed = performance.now() - processingStartedAt.current!;
+        const fastPhaseDuration = 650;
+
+        if (elapsed <= fastPhaseDuration) {
+          const fastPhase = elapsed / fastPhaseDuration;
+          const easedFastPhase = 1 - Math.pow(1 - fastPhase, 3);
+          publishProgress(70 * easedFastPhase);
+        } else {
+          const slowPhaseElapsed = elapsed - fastPhaseDuration;
+          publishProgress(70 + 25 * (1 - Math.exp(-slowPhaseElapsed / 2200)));
+        }
+      }
+
+      if (displayedLevel.current !== targetLevel.current || isProcessing) {
+        animationFrame = window.requestAnimationFrame(animate);
+      }
+    };
+    const scheduleAnimation = () => {
+      if (animationFrame === 0) {
+        animationFrame = window.requestAnimationFrame(animate);
+      }
+    };
+
     const stateListener = listen<OverlayState>("overlay-state", (event) => {
       const nextState = event.payload;
       setState(nextState);
@@ -28,13 +76,15 @@ export default function Overlay() {
       if (nextState.phase === "analysing") {
         processingStartedAt.current = performance.now();
         processingComplete.current = false;
-        setProgress(0);
+        publishProgress(0);
+        scheduleAnimation();
       } else if (nextState.phase === "recording" || nextState.phase === "error") {
         setIsClosing(false);
         setAppearanceKey((current) => current + 1);
         processingStartedAt.current = null;
         processingComplete.current = false;
-        setProgress(0);
+        publishProgress(0);
+        scheduleAnimation();
       }
     });
     const dismissalListener = listen("overlay-dismiss", () => {
@@ -42,41 +92,16 @@ export default function Overlay() {
     });
     const completionListener = listen("overlay-progress-complete", () => {
       processingComplete.current = true;
-      setProgress(100);
+      publishProgress(100);
+      scheduleAnimation();
     });
     const waveListener = listen<{ level: number }>("waveform", (event) => {
       const rawLevel = Math.max(0, Math.min(1, event.payload.level));
       targetLevel.current = rawLevel < 0.012
         ? 0
         : Math.min(1, Math.pow(rawLevel, 0.7) * 1.28);
+      scheduleAnimation();
     });
-    let animationFrame = 0;
-    const animate = () => {
-      const difference = targetLevel.current - displayedLevel.current;
-      const smoothing = difference > 0 ? 0.34 : 0.16;
-      displayedLevel.current += difference * smoothing;
-      if (Math.abs(difference) < 0.002) {
-        displayedLevel.current = targetLevel.current;
-      }
-      setLevel(displayedLevel.current);
-
-      if (processingStartedAt.current !== null && !processingComplete.current) {
-        const elapsed = performance.now() - processingStartedAt.current;
-        const fastPhaseDuration = 650;
-
-        if (elapsed <= fastPhaseDuration) {
-          const fastPhase = elapsed / fastPhaseDuration;
-          const easedFastPhase = 1 - Math.pow(1 - fastPhase, 3);
-          setProgress(70 * easedFastPhase);
-        } else {
-          const slowPhaseElapsed = elapsed - fastPhaseDuration;
-          setProgress(70 + 25 * (1 - Math.exp(-slowPhaseElapsed / 2200)));
-        }
-      }
-
-      animationFrame = window.requestAnimationFrame(animate);
-    };
-    animationFrame = window.requestAnimationFrame(animate);
 
     return () => {
       window.cancelAnimationFrame(animationFrame);

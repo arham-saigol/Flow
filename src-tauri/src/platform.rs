@@ -454,6 +454,8 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
 }
 
 unsafe fn send_unicode(text: &str) -> Result<()> {
+    const INPUTS_PER_CHUNK: usize = 128;
+
     let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
     let mut characters = text.chars().peekable();
     while let Some(character) = characters.next() {
@@ -474,7 +476,21 @@ unsafe fn send_unicode(text: &str) -> Result<()> {
             }
         }
     }
-    send_inputs(&inputs)
+
+    for chunk in inputs.chunks(INPUTS_PER_CHUNK) {
+        let mut sent = 0;
+        while sent < chunk.len() {
+            let inserted = SendInput(&chunk[sent..], size_of::<INPUT>() as i32) as usize;
+            if inserted == 0 {
+                return Err(FlowError::Windows(format!(
+                    "Windows accepted {sent} of {} keyboard input events in the current chunk.",
+                    chunk.len()
+                )));
+            }
+            sent += inserted;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {

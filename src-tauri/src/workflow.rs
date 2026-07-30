@@ -126,7 +126,7 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
 
     match result {
         Ok(history_error) => {
-            dismiss_overlay(app).await;
+            dismiss_overlay(app, None).await;
             let _ = app.emit(
                 "dictation-complete",
                 MessagePayload {
@@ -192,7 +192,7 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
     tauri::async_runtime::spawn(async move {
         tokio_sleep(std::time::Duration::from_secs(4)).await;
         if ERROR_GENERATION.load(Ordering::Acquire) == generation {
-            dismiss_overlay(&app_clone).await;
+            dismiss_overlay(&app_clone, Some(generation)).await;
         }
     });
 }
@@ -214,10 +214,15 @@ fn hide_overlay(app: &AppHandle) {
     }
 }
 
-async fn dismiss_overlay(app: &AppHandle) {
+async fn dismiss_overlay(app: &AppHandle, expected_generation: Option<u64>) {
     let _ = app.emit_to("overlay", "overlay-dismiss", ());
     tokio_sleep(std::time::Duration::from_millis(130)).await;
-    hide_overlay(app);
+    if expected_generation
+        .map(|generation| ERROR_GENERATION.load(Ordering::Acquire) == generation)
+        .unwrap_or(true)
+    {
+        hide_overlay(app);
+    }
 }
 
 pub(crate) fn normalize_utterance(value: &str) -> String {

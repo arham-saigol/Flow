@@ -45,7 +45,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   gap: 9px;
   color: var(--text);
 }
-.logo svg { display: block; flex: 0 0 auto; fill: currentColor; }
+.logo svg { display: block; flex: 0 0 auto; fill: currentcolor; }
 .logo-symbol { width: 23px; height: 23px; }
 .logo-wordmark { width: 67px; height: 23px; }
 .sidebar nav { display: grid; gap: 5px; }
@@ -253,6 +253,7 @@ body:has(.overlay-bar) #root {
 }
 .overlay-bar {
   --overlay-outline: rgba(248, 247, 244, .24);
+
   width: 92px;
   height: 38px;
   padding: 0 7px;
