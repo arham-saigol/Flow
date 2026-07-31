@@ -525,6 +525,11 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
                     "The dictation target lost focus before Flow could paste.".into(),
                 ));
             }
+            if shortcut_modifiers_down() {
+                return Err(FlowError::Windows(
+                    "A modifier key was pressed before Flow could paste the dictation.".into(),
+                ));
+            }
             send_armed_paste_shortcut()?;
             temporary_sequence =
                 wait_for_temporary_clipboard_request(temporary_sequence, Duration::from_secs(5))?;
@@ -614,20 +619,20 @@ unsafe fn prepare_temporary_clipboard(
         exclude_from_clipboard_services();
         Ok(())
     })();
+    let temporary_sequence = GetClipboardSequenceNumber();
     let _ = CloseClipboard();
     if let Err(replace_error) = replace_result {
         if let Ok(mut state) = CLIPBOARD_RENDER_STATE.lock() {
             *state = None;
         }
-        let failed_sequence = GetClipboardSequenceNumber();
-        return match restore_clipboard(&original, Some(failed_sequence)) {
+        return match restore_clipboard(&original, Some(temporary_sequence)) {
             Ok(()) => Err(replace_error),
             Err(restore_error) => Err(FlowError::Windows(format!(
                 "{replace_error} The previous clipboard also could not be restored: {restore_error}"
             ))),
         };
     }
-    Ok(Some((original, GetClipboardSequenceNumber())))
+    Ok(Some((original, temporary_sequence)))
 }
 
 unsafe fn set_delayed_clipboard_text() -> Result<()> {
@@ -809,7 +814,9 @@ unsafe extern "system" fn clipboard_window_proc(
                 let requested_by_target = match GetOpenClipboardWindow() {
                     Ok(requester) => {
                         let mut requester_process_id = 0;
-                        GetWindowThreadProcessId(requester, Some(&mut requester_process_id)) != 0
+                        state.paste_armed
+                            && GetWindowThreadProcessId(requester, Some(&mut requester_process_id))
+                                != 0
                             && requester_process_id == state.target_process_id
                     }
                     Err(_) => {
@@ -877,24 +884,26 @@ fn wait_for_temporary_clipboard_request(sequence: u32, timeout: Duration) -> Res
 
 fn wait_for_shortcut_modifiers(timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
-    while unsafe {
-        [
-            VK_CONTROL.0,
-            VK_SHIFT.0,
-            VK_MENU.0,
-            VK_LWIN.0,
-            VK_RWIN.0,
-            0x56,
-        ]
-        .into_iter()
-        .any(|key| key_is_down(key))
-    } {
+    while unsafe { shortcut_modifiers_down() } {
         if Instant::now() >= deadline {
             return false;
         }
         thread::sleep(Duration::from_millis(10));
     }
     true
+}
+
+unsafe fn shortcut_modifiers_down() -> bool {
+    [
+        VK_CONTROL.0,
+        VK_SHIFT.0,
+        VK_MENU.0,
+        VK_LWIN.0,
+        VK_RWIN.0,
+        0x56,
+    ]
+    .into_iter()
+    .any(|key| key_is_down(key))
 }
 
 unsafe fn key_is_down(key: u16) -> bool {
