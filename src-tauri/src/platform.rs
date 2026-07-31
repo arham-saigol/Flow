@@ -750,29 +750,47 @@ unsafe fn restore_clipboard(items: &[ClipboardItem], expected_sequence: Option<u
             // while Flow was waiting to acquire it. Preserve that newer value.
             return Ok(());
         }
-        EmptyClipboard().map_err(|error| {
-            FlowError::Windows(format!("Could not clear the temporary clipboard: {error}"))
-        })?;
+        let mut allocations = Vec::with_capacity(items.len());
         for item in items {
-            let allocation = GlobalAlloc(GMEM_MOVEABLE, item.data.len()).map_err(|error| {
-                FlowError::Windows(format!(
-                    "Could not allocate the restored clipboard: {error}"
-                ))
-            })?;
+            let allocation = match GlobalAlloc(GMEM_MOVEABLE, item.data.len()) {
+                Ok(allocation) => allocation,
+                Err(error) => {
+                    for (_, allocation) in allocations {
+                        let _ = GlobalFree(allocation);
+                    }
+                    return Err(FlowError::Windows(format!(
+                        "Could not allocate the restored clipboard: {error}"
+                    )));
+                }
+            };
             let pointer = GlobalLock(allocation).cast::<u8>();
             if pointer.is_null() {
                 let _ = GlobalFree(allocation);
+                for (_, allocation) in allocations {
+                    let _ = GlobalFree(allocation);
+                }
                 return Err(FlowError::Windows(
                     "Could not access the restored clipboard.".into(),
                 ));
             }
             std::ptr::copy_nonoverlapping(item.data.as_ptr(), pointer, item.data.len());
             let _ = GlobalUnlock(allocation);
-            if let Err(error) = SetClipboardData(
-                item.format,
-                windows::Win32::Foundation::HANDLE(allocation.0),
-            ) {
+            allocations.push((item.format, allocation));
+        }
+        EmptyClipboard().map_err(|error| {
+            for (_, allocation) in allocations.iter().copied() {
                 let _ = GlobalFree(allocation);
+            }
+            FlowError::Windows(format!("Could not clear the temporary clipboard: {error}"))
+        })?;
+        for (index, (format, allocation)) in allocations.iter().copied().enumerate() {
+            if let Err(error) =
+                SetClipboardData(format, windows::Win32::Foundation::HANDLE(allocation.0))
+            {
+                let _ = GlobalFree(allocation);
+                for (_, allocation) in allocations.iter().skip(index + 1).copied() {
+                    let _ = GlobalFree(allocation);
+                }
                 return Err(FlowError::Windows(format!(
                     "Could not restore the clipboard: {error}"
                 )));
