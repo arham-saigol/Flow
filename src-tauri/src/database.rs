@@ -282,6 +282,11 @@ impl Database {
         let (value, correction) = validate_dictionary_entry(value, correction)?;
         let now = Self::now();
         let conn = self.conn()?;
+        if correction.is_some() && normalized_correction_source_exists(&conn, &value, None)? {
+            return Err(FlowError::Message(
+                "That dictionary entry already exists.".into(),
+            ));
+        }
         conn.execute(
             "INSERT INTO dictionary(value, correction, created_at) VALUES(?1, ?2, ?3)",
             params![value, correction, now],
@@ -297,14 +302,17 @@ impl Database {
 
     pub fn update_dictionary(&self, id: i64, value: &str, correction: Option<&str>) -> Result<()> {
         let (value, correction) = validate_dictionary_entry(value, correction)?;
-        self.conn()?
-            .execute(
-                "UPDATE dictionary SET value = ?1, correction = ?2 WHERE id = ?3",
-                params![value, correction, id],
-            )
-            .map_err(|error| {
-                map_unique_violation(error, "That dictionary entry already exists.")
-            })?;
+        let conn = self.conn()?;
+        if correction.is_some() && normalized_correction_source_exists(&conn, &value, Some(id))? {
+            return Err(FlowError::Message(
+                "That dictionary entry already exists.".into(),
+            ));
+        }
+        conn.execute(
+            "UPDATE dictionary SET value = ?1, correction = ?2 WHERE id = ?3",
+            params![value, correction, id],
+        )
+        .map_err(|error| map_unique_violation(error, "That dictionary entry already exists."))?;
         Ok(())
     }
 
@@ -431,6 +439,24 @@ fn normalized_trigger_exists(
     }))
 }
 
+fn normalized_correction_source_exists(
+    conn: &Connection,
+    value: &str,
+    excluded_id: Option<i64>,
+) -> Result<bool> {
+    let normalized = crate::workflow::normalize_utterance(value);
+    let mut statement =
+        conn.prepare("SELECT id, value FROM dictionary WHERE correction IS NOT NULL")?;
+    let entries = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(entries.into_iter().any(|(id, existing)| {
+        Some(id) != excluded_id && crate::workflow::normalize_utterance(&existing) == normalized
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -502,6 +528,39 @@ mod tests {
             error.to_string(),
             "The misspelling and correction must be different."
         );
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dictionary_rejects_duplicate_normalized_correction_sources() {
+        let path = database_path("normalized-dictionary-corrections");
+        let database = Database::open(&path).unwrap();
+
+        database
+            .add_dictionary("four word", Some("Forward"))
+            .unwrap();
+        let regular = database.add_dictionary("foo.", None).unwrap();
+
+        let add_error = database
+            .add_dictionary("four   word.", Some("Foreword"))
+            .unwrap_err();
+        assert_eq!(
+            add_error.to_string(),
+            "That dictionary entry already exists."
+        );
+
+        database
+            .add_dictionary("foo", Some("food"))
+            .expect("regular entries do not create correction rules");
+        let update_error = database
+            .update_dictionary(regular.id, "FOO.", Some("fool"))
+            .unwrap_err();
+        assert_eq!(
+            update_error.to_string(),
+            "That dictionary entry already exists."
+        );
+
         drop(database);
         let _ = std::fs::remove_file(path);
     }
