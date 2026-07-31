@@ -63,6 +63,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS dictionary (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 value TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                correction TEXT,
                 created_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS snippets (
@@ -73,6 +74,17 @@ impl Database {
             );
             ",
         )?;
+        let has_correction: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('dictionary')
+                WHERE name = 'correction'
+            )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_correction {
+            connection.execute("ALTER TABLE dictionary ADD COLUMN correction TEXT", [])?;
+        }
         Ok(Self {
             connection: Mutex::new(connection),
         })
@@ -250,52 +262,57 @@ impl Database {
     pub fn dictionary(&self) -> Result<Vec<DictionaryEntry>> {
         let conn = self.conn()?;
         let mut statement = conn.prepare(
-            "SELECT id, value, created_at FROM dictionary ORDER BY value COLLATE NOCASE",
+            "SELECT id, value, correction, created_at
+             FROM dictionary ORDER BY value COLLATE NOCASE",
         )?;
         let entries = statement
             .query_map([], |row| {
                 Ok(DictionaryEntry {
                     id: row.get(0)?,
                     value: row.get(1)?,
-                    created_at: row.get(2)?,
+                    correction: row.get(2)?,
+                    created_at: row.get(3)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(entries)
     }
 
-    pub fn add_dictionary(&self, value: &str) -> Result<DictionaryEntry> {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(FlowError::Message("Enter a word or name.".into()));
-        }
+    pub fn add_dictionary(&self, value: &str, correction: Option<&str>) -> Result<DictionaryEntry> {
+        let (value, correction) = validate_dictionary_entry(value, correction)?;
         let now = Self::now();
         let conn = self.conn()?;
+        if correction.is_some() && normalized_correction_source_exists(&conn, &value, None)? {
+            return Err(FlowError::Message(
+                "That dictionary entry already exists.".into(),
+            ));
+        }
         conn.execute(
-            "INSERT INTO dictionary(value, created_at) VALUES(?1, ?2)",
-            params![value, now],
+            "INSERT INTO dictionary(value, correction, created_at) VALUES(?1, ?2, ?3)",
+            params![value, correction, now],
         )
         .map_err(|error| map_unique_violation(error, "That dictionary entry already exists."))?;
         Ok(DictionaryEntry {
             id: conn.last_insert_rowid(),
-            value: value.into(),
+            value,
+            correction,
             created_at: now,
         })
     }
 
-    pub fn update_dictionary(&self, id: i64, value: &str) -> Result<()> {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(FlowError::Message("Enter a word or name.".into()));
+    pub fn update_dictionary(&self, id: i64, value: &str, correction: Option<&str>) -> Result<()> {
+        let (value, correction) = validate_dictionary_entry(value, correction)?;
+        let conn = self.conn()?;
+        if correction.is_some() && normalized_correction_source_exists(&conn, &value, Some(id))? {
+            return Err(FlowError::Message(
+                "That dictionary entry already exists.".into(),
+            ));
         }
-        self.conn()?
-            .execute(
-                "UPDATE dictionary SET value = ?1 WHERE id = ?2",
-                params![value, id],
-            )
-            .map_err(|error| {
-                map_unique_violation(error, "That dictionary entry already exists.")
-            })?;
+        conn.execute(
+            "UPDATE dictionary SET value = ?1, correction = ?2 WHERE id = ?3",
+            params![value, correction, id],
+        )
+        .map_err(|error| map_unique_violation(error, "That dictionary entry already exists."))?;
         Ok(())
     }
 
@@ -376,6 +393,29 @@ impl Database {
     }
 }
 
+fn validate_dictionary_entry(
+    value: &str,
+    correction: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(FlowError::Message("Enter a word or name.".into()));
+    }
+    if correction.is_some() && crate::workflow::normalize_correction_source(value).is_empty() {
+        return Err(FlowError::Message("Enter a word or name.".into()));
+    }
+    let correction = correction.map(str::trim);
+    if correction.is_some_and(str::is_empty) {
+        return Err(FlowError::Message("Enter the correct spelling.".into()));
+    }
+    if correction.is_some_and(|correction| correction == value) {
+        return Err(FlowError::Message(
+            "The misspelling and correction must be different.".into(),
+        ));
+    }
+    Ok((value.into(), correction.map(str::to_owned)))
+}
+
 fn retention_seconds(retention: &str) -> Option<i64> {
     match retention {
         "24 hours" => Some(86_400),
@@ -400,4 +440,141 @@ fn normalized_trigger_exists(
     Ok(triggers.into_iter().any(|(id, existing)| {
         Some(id) != excluded_id && crate::workflow::normalize_utterance(&existing) == normalized
     }))
+}
+
+fn normalized_correction_source_exists(
+    conn: &Connection,
+    value: &str,
+    excluded_id: Option<i64>,
+) -> Result<bool> {
+    let normalized = crate::workflow::normalize_correction_source(value);
+    let mut statement =
+        conn.prepare("SELECT id, value FROM dictionary WHERE correction IS NOT NULL")?;
+    let entries = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(entries.into_iter().any(|(id, existing)| {
+        Some(id) != excluded_id
+            && crate::workflow::normalize_correction_source(&existing) == normalized
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    use rusqlite::Connection;
+
+    use super::Database;
+
+    static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn database_path(test_name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "flow-{test_name}-{}-{}.sqlite3",
+            std::process::id(),
+            DATABASE_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    #[test]
+    fn opening_an_existing_database_adds_nullable_corrections() {
+        let path = database_path("dictionary-migration");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "
+                CREATE TABLE dictionary (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    value TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO dictionary(value, created_at) VALUES('Flow', 1);
+                ",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let database = Database::open(&path).unwrap();
+        let entries = database.dictionary().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "Flow");
+        assert_eq!(entries[0].correction, None);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dictionary_entries_can_convert_between_words_and_corrections() {
+        let path = database_path("dictionary-corrections");
+        let database = Database::open(&path).unwrap();
+
+        let entry = database
+            .add_dictionary("  btw ", Some(" by the way  "))
+            .unwrap();
+        assert_eq!(entry.value, "btw");
+        assert_eq!(entry.correction.as_deref(), Some("by the way"));
+
+        database.update_dictionary(entry.id, "Flow", None).unwrap();
+        let entries = database.dictionary().unwrap();
+        assert_eq!(entries[0].value, "Flow");
+        assert_eq!(entries[0].correction, None);
+
+        database
+            .update_dictionary(entry.id, "same", Some("SAME"))
+            .unwrap();
+        let entries = database.dictionary().unwrap();
+        assert_eq!(entries[0].correction.as_deref(), Some("SAME"));
+
+        let error = database
+            .update_dictionary(entry.id, "same", Some("same"))
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "The misspelling and correction must be different."
+        );
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn dictionary_rejects_duplicate_normalized_correction_sources() {
+        let path = database_path("normalized-dictionary-corrections");
+        let database = Database::open(&path).unwrap();
+
+        database
+            .add_dictionary("four word", Some("Forward"))
+            .unwrap();
+        let regular = database.add_dictionary("foo.", None).unwrap();
+
+        let empty_source_error = database.add_dictionary("...", Some("Forward")).unwrap_err();
+        assert_eq!(empty_source_error.to_string(), "Enter a word or name.");
+
+        let add_error = database
+            .add_dictionary("four   word.", Some("Foreword"))
+            .unwrap_err();
+        assert_eq!(
+            add_error.to_string(),
+            "That dictionary entry already exists."
+        );
+
+        database
+            .add_dictionary("foo", Some("food"))
+            .expect("regular entries do not create correction rules");
+        let update_error = database
+            .update_dictionary(regular.id, "FOO.", Some("fool"))
+            .unwrap_err();
+        assert_eq!(
+            update_error.to_string(),
+            "That dictionary entry already exists."
+        );
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
 }

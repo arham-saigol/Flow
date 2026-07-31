@@ -240,6 +240,8 @@ textarea { resize: vertical; line-height: 1.5; }
 .flat-row { min-height: 53px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px 7px 17px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
 .flat-row:last-child { border-bottom: 0; }
 .flat-row input { height: 36px; padding: 7px 9px; }
+.dictionary-entry-value { display: inline-flex; align-items: center; gap: 7px; min-width: 0; }
+.dictionary-entry-arrow { color: var(--quiet); }
 .row-actions { display: flex; gap: 2px; align-items: center; }
 .icon-button { width: 32px; height: 32px; padding: 0; display: inline-grid; place-items: center; color: var(--muted); background: transparent; border: 0; border-radius: 8px; cursor: pointer; }
 .icon-button:hover { color: var(--text); background: var(--panel-strong); }
@@ -429,6 +431,27 @@ textarea::-webkit-scrollbar {
 .creation-dialog--vocabulary .creation-dialog__body input {
   height: 42px;
   border-color: #c9c4ba;
+}
+.dictionary-correction-toggle {
+  min-height: 49px;
+  padding: 0;
+}
+.creation-dialog--vocabulary .dictionary-correction-toggle input {
+  width: 36px;
+  height: 20px;
+  border: 0;
+}
+.dictionary-correction-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+}
+.dictionary-correction-fields input { min-width: 0; width: 100%; }
+.dictionary-correction-fields > span {
+  color: var(--muted);
+  font-size: 16px;
+  text-align: center;
 }
 .creation-dialog footer {
   padding: 0 23px 20px;

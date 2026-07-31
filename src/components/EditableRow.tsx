@@ -1,27 +1,32 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import type { DictionaryEntry } from "../types";
 
 export function EditableRow({
-  value,
+  entry,
   onSave,
   onDelete,
   onError,
 }: {
-  value: string;
-  onSave: (value: string) => Promise<void>;
+  entry: DictionaryEntry;
+  onSave: (value: string, correction: string | null) => Promise<void>;
   onDelete: () => Promise<void>;
   onError: (error: unknown) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState(value);
+  const [draft, setDraft] = useState(entry.value);
+  const [draftCorrection, setDraftCorrection] = useState(entry.correction ?? "");
+  const [correctingMisspelling, setCorrectingMisspelling] = useState(entry.correction !== null);
   const editButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useDialogFocus(editing, editButtonRef);
 
   const close = () => {
     if (saving) return;
-    setDraft(value);
+    setDraft(entry.value);
+    setDraftCorrection(entry.correction ?? "");
+    setCorrectingMisspelling(entry.correction !== null);
     setEditing(false);
   };
 
@@ -32,16 +37,23 @@ export function EditableRow({
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [editing, saving, value]);
+  }, [editing, saving, entry.value, entry.correction]);
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
     const next = draft.trim();
-    if (!next) return;
+    const nextCorrection = correctingMisspelling ? draftCorrection.trim() : null;
+    if (
+      !next ||
+      (correctingMisspelling &&
+        (!nextCorrection || next === nextCorrection))
+    ) return;
     setSaving(true);
     try {
-      await onSave(next);
+      await onSave(next, nextCorrection);
       setDraft(next);
+      setDraftCorrection(nextCorrection ?? "");
+      setCorrectingMisspelling(nextCorrection !== null);
       setEditing(false);
     } catch (error) {
       onError(error);
@@ -49,22 +61,40 @@ export function EditableRow({
       setSaving(false);
     }
   };
+  const displayValue = entry.correction
+    ? `${entry.value} → ${entry.correction}`
+    : entry.value;
+  const canSave =
+    Boolean(draft.trim()) &&
+    (!correctingMisspelling ||
+      (Boolean(draftCorrection.trim()) &&
+        draft.trim() !== draftCorrection.trim()));
 
   return (
     <div className="flat-row">
-      <span>{value}</span>
+      <span className="dictionary-entry-value">
+        {entry.value}
+        {entry.correction && (
+          <>
+            <span className="dictionary-entry-arrow" aria-hidden="true">→</span>
+            <span>{entry.correction}</span>
+          </>
+        )}
+      </span>
       <div className="row-actions">
         <button
           ref={editButtonRef}
           className="icon-button"
-          aria-label={`Edit ${value}`}
+          type="button"
+          aria-label={`Edit ${displayValue}`}
           onClick={() => setEditing(true)}
         >
           <Pencil size={15} />
         </button>
         <button
           className="icon-button icon-button--danger"
-          aria-label={`Remove ${value}`}
+          type="button"
+          aria-label={`Remove ${displayValue}`}
           onClick={() => void onDelete().catch(onError)}
         >
           <Trash2 size={15} />
@@ -89,20 +119,55 @@ export function EditableRow({
             </header>
             <form onSubmit={(event) => void save(event)}>
               <div className="creation-dialog__body">
-                <input
-                  aria-label="Vocabulary word"
-                  autoFocus
-                  value={draft}
-                  maxLength={120}
-                  disabled={saving}
-                  onChange={(event) => setDraft(event.target.value)}
-                />
+                <label className="dictionary-correction-toggle toggle-row">
+                  <div>
+                    <span>Correct a misspelling</span>
+                  </div>
+                  <input
+                    type="checkbox"
+                    role="switch"
+                    checked={correctingMisspelling}
+                    disabled={saving}
+                    onChange={(event) => setCorrectingMisspelling(event.target.checked)}
+                  />
+                </label>
+                {correctingMisspelling ? (
+                  <div className="dictionary-correction-fields">
+                    <input
+                      aria-label="Misspelling"
+                      autoFocus
+                      placeholder="Misspelling"
+                      value={draft}
+                      maxLength={120}
+                      disabled={saving}
+                      onChange={(event) => setDraft(event.target.value)}
+                    />
+                    <span aria-hidden="true">→</span>
+                    <input
+                      aria-label="Correct spelling"
+                      placeholder="Correct spelling"
+                      value={draftCorrection}
+                      maxLength={120}
+                      disabled={saving}
+                      onChange={(event) => setDraftCorrection(event.target.value)}
+                    />
+                  </div>
+                ) : (
+                  <input
+                    aria-label="Vocabulary word"
+                    autoFocus
+                    value={draft}
+                    maxLength={120}
+                    disabled={saving}
+                    onChange={(event) => setDraft(event.target.value)}
+                  />
+                )}
               </div>
               <footer>
                 <button className="secondary-button" type="button" disabled={saving} onClick={close}>
                   Cancel
                 </button>
-                <button className="primary-button" type="submit" disabled={!draft.trim() || saving}>
+                <button className="primary-button" type="submit" disabled={!canSave || saving}>
                   {saving ? "Saving…" : "Save changes"}
                 </button>
               </footer>

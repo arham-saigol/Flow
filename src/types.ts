@@ -12,6 +12,7 @@ export interface HistoryEntry {
 export interface DictionaryEntry {
   id: number;
   value: string;
+  correction: string | null;
   created_at: number;
 }
 
