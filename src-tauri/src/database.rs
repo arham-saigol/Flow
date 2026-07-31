@@ -401,7 +401,7 @@ fn validate_dictionary_entry(
     if value.is_empty() {
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
-    if correction.is_some() && crate::workflow::normalize_utterance(value).is_empty() {
+    if correction.is_some() && crate::workflow::normalize_correction_source(value).is_empty() {
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
     let correction = correction.map(str::trim);
@@ -447,7 +447,7 @@ fn normalized_correction_source_exists(
     value: &str,
     excluded_id: Option<i64>,
 ) -> Result<bool> {
-    let normalized = crate::workflow::normalize_utterance(value);
+    let normalized = crate::workflow::normalize_correction_source(value);
     let mut statement =
         conn.prepare("SELECT id, value FROM dictionary WHERE correction IS NOT NULL")?;
     let entries = statement
@@ -456,7 +456,8 @@ fn normalized_correction_source_exists(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(entries.into_iter().any(|(id, existing)| {
-        Some(id) != excluded_id && crate::workflow::normalize_utterance(&existing) == normalized
+        Some(id) != excluded_id
+            && crate::workflow::normalize_correction_source(&existing) == normalized
     }))
 }
 

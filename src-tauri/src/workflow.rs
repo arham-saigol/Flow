@@ -231,10 +231,12 @@ fn dictionary_guidance(entries: &[DictionaryEntry]) -> (Vec<String>, Vec<(String
     let corrections = entries
         .iter()
         .filter_map(|entry| {
-            entry
-                .correction
-                .as_ref()
-                .map(|correction| (normalize_utterance(&entry.value), correction.clone()))
+            entry.correction.as_ref().map(|correction| {
+                (
+                    normalize_correction_source(&entry.value),
+                    correction.clone(),
+                )
+            })
         })
         .collect();
     (preferred_spellings, corrections)
@@ -250,13 +252,47 @@ pub(crate) fn normalize_utterance(value: &str) -> String {
         .to_lowercase()
 }
 
+pub(crate) fn normalize_correction_source(value: &str) -> String {
+    value
+        .trim_start_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '"' | '\'' | '(' | '[' | '{' | '“' | '‘' | '¿' | '¡'
+                )
+        })
+        .trim_end_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    '.' | ','
+                        | '!'
+                        | '?'
+                        | ';'
+                        | ':'
+                        | '"'
+                        | '\''
+                        | ')'
+                        | ']'
+                        | '}'
+                        | '…'
+                        | '”'
+                        | '’'
+                )
+        })
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
 fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> String {
-    let normalized = normalize_utterance(value);
+    let normalized = normalize_correction_source(value);
     let mut corrections = corrections
         .iter()
         .map(|(incorrect, correct)| {
             (
-                normalize_utterance(incorrect),
+                normalize_correction_source(incorrect),
                 normalize_correction_replacement(correct),
             )
         })
@@ -343,11 +379,23 @@ mod tests {
                 correction: Some("by the way".into()),
                 created_at: 2,
             },
+            DictionaryEntry {
+                id: 3,
+                value: ".NET".into(),
+                correction: Some("dotnet".into()),
+                created_at: 3,
+            },
         ];
 
         let (preferred_spellings, corrections) = dictionary_guidance(&entries);
-        assert_eq!(preferred_spellings, ["Flow", "by the way"]);
-        assert_eq!(corrections, [("btw".into(), "by the way".into())]);
+        assert_eq!(preferred_spellings, ["Flow", "by the way", "dotnet"]);
+        assert_eq!(
+            corrections,
+            [
+                ("btw".into(), "by the way".into()),
+                (".net".into(), "dotnet".into())
+            ]
+        );
     }
 
     #[test]
@@ -355,6 +403,7 @@ mod tests {
         let corrections = vec![
             ("four word".into(), "Forward".into()),
             ("see sharp".into(), "C#".into()),
+            ("C++".into(), "C Plus Plus".into()),
         ];
         assert_eq!(
             normalize_with_corrections("Please, four word now.", &corrections),
@@ -367,6 +416,14 @@ mod tests {
         assert_eq!(
             normalize_with_corrections("see sharp project", &corrections),
             "c# project"
+        );
+        assert_eq!(
+            normalize_with_corrections("C++ project", &corrections),
+            "c plus plus project"
+        );
+        assert_eq!(
+            normalize_with_corrections("c project", &corrections),
+            "c project"
         );
     }
 }
