@@ -19,8 +19,8 @@ use windows::{
         System::{
             DataExchange::{
                 CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
-                GetClipboardData, GetClipboardSequenceNumber, OpenClipboard,
-                RegisterClipboardFormatW, SetClipboardData,
+                GetClipboardData, GetClipboardSequenceNumber, GetOpenClipboardWindow,
+                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
@@ -33,13 +33,14 @@ use windows::{
             },
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::{
-                CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
-                SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
-                KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT,
-                WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-                WM_RBUTTONUP, WM_RENDERFORMAT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
-                WM_XBUTTONUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, XBUTTON1,
+                CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW,
+                GetWindowThreadProcessId, IsWindow, SetForegroundWindow, SetWindowLongPtrW,
+                SetWindowsHookExW, GWL_EXSTYLE, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+                LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
+                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+                WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RENDERFORMAT,
+                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, XBUTTON1,
             },
         },
     },
@@ -394,8 +395,8 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
     if text.is_empty() {
         return Ok(());
     }
+    let target_hwnd = HWND(target.hwnd as *mut _);
     unsafe {
-        let target_hwnd = HWND(target.hwnd as *mut _);
         if target.hwnd == 0 || !IsWindow(target_hwnd).as_bool() {
             return Err(FlowError::Windows(
                 "The application selected when dictation ended is no longer open.".into(),
@@ -413,7 +414,7 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
             ));
         }
     }
-    paste_via_clipboard(text)
+    paste_via_clipboard(target_hwnd, text)
 }
 
 pub fn copy_text(text: &str) -> Result<()> {
@@ -498,7 +499,7 @@ unsafe fn write_clipboard_dword(format: u32, value: u32) -> Result<()> {
     Ok(())
 }
 
-fn paste_via_clipboard(text: &str) -> Result<()> {
+fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
     let _operation = CLIPBOARD_OPERATION
         .lock()
         .map_err(|_| FlowError::Windows("The clipboard handler is unavailable.".into()))?;
@@ -509,10 +510,21 @@ fn paste_via_clipboard(text: &str) -> Result<()> {
             ));
         }
 
-        let Some((original, mut temporary_sequence)) = prepare_temporary_clipboard(text)? else {
+        let Some((original, mut temporary_sequence)) = prepare_temporary_clipboard(target, text)?
+        else {
+            if GetForegroundWindow().0 != target.0 {
+                return Err(FlowError::Windows(
+                    "The dictation target lost focus before Flow could type.".into(),
+                ));
+            }
             return send_unicode(text);
         };
         let paste_result = (|| {
+            if GetForegroundWindow().0 != target.0 {
+                return Err(FlowError::Windows(
+                    "The dictation target lost focus before Flow could paste.".into(),
+                ));
+            }
             send_paste_shortcut()?;
             temporary_sequence =
                 wait_for_temporary_clipboard_request(temporary_sequence, Duration::from_secs(5))?;
@@ -547,6 +559,7 @@ fn paste_via_clipboard(text: &str) -> Result<()> {
 
 struct ClipboardRenderState {
     wide: Vec<u16>,
+    target_process_id: u32,
     rendered: Option<std::result::Result<u32, String>>,
 }
 
@@ -555,9 +568,19 @@ struct ClipboardItem {
     data: Vec<u8>,
 }
 
-unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<(Vec<ClipboardItem>, u32)>> {
+unsafe fn prepare_temporary_clipboard(
+    target: HWND,
+    text: &str,
+) -> Result<Option<(Vec<ClipboardItem>, u32)>> {
     let owner = clipboard_owner()?;
     ensure_clipboard_render_handler(owner)?;
+    let mut target_process_id = 0;
+    if GetWindowThreadProcessId(target, Some(&mut target_process_id)) == 0 || target_process_id == 0
+    {
+        return Err(FlowError::Windows(
+            "Could not identify the dictation target process.".into(),
+        ));
+    }
     open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let original = match capture_open_clipboard() {
         Ok(Some(original)) => original,
@@ -575,6 +598,7 @@ unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<(Vec<Clipboar
         Ok(mut state) => {
             *state = Some(ClipboardRenderState {
                 wide,
+                target_process_id,
                 rendered: None,
             });
         }
@@ -779,6 +803,16 @@ unsafe extern "system" fn clipboard_window_proc(
     if message == WM_RENDERFORMAT && wparam.0 as u32 == CF_UNICODETEXT {
         if let Ok(mut guard) = CLIPBOARD_RENDER_STATE.lock() {
             if let Some(state) = guard.as_mut() {
+                let requested_by_target = GetOpenClipboardWindow().ok().is_some_and(|requester| {
+                    let mut requester_process_id = 0;
+                    GetWindowThreadProcessId(requester, Some(&mut requester_process_id)) != 0
+                        && requester_process_id == state.target_process_id
+                });
+                if !requested_by_target {
+                    // Keep the format delayed when a clipboard monitor asks first;
+                    // only the dictation target may materialize the temporary text.
+                    return LRESULT(0);
+                }
                 state.rendered = Some(
                     write_clipboard_wide(&state.wide)
                         .map(|_| GetClipboardSequenceNumber())
