@@ -433,8 +433,7 @@ fn clipboard_owner() -> Result<HWND> {
 
 unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    OpenClipboard(clipboard_owner()?)
-        .map_err(|error| FlowError::Windows(format!("Could not open the clipboard: {error}")))?;
+    open_clipboard_with_retry(clipboard_owner()?, "Could not open the clipboard")?;
     if let Err(error) = EmptyClipboard() {
         let _ = CloseClipboard();
         return Err(FlowError::Windows(format!(
@@ -446,12 +445,7 @@ unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<(
         return Err(error);
     }
     if !include_in_history {
-        // Windows honors this registered format when clipboard history is enabled.
-        // It is best-effort so pasting still works on systems that reject the marker.
-        let history_format = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
-        if history_format != 0 {
-            let _ = write_clipboard_dword(history_format, 0);
-        }
+        exclude_from_clipboard_services();
     }
     let _ = CloseClipboard();
     Ok(())
@@ -564,9 +558,7 @@ struct ClipboardItem {
 unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<(Vec<ClipboardItem>, u32)>> {
     let owner = clipboard_owner()?;
     ensure_clipboard_render_handler(owner)?;
-    OpenClipboard(owner).map_err(|error| {
-        FlowError::Windows(format!("Could not preserve the clipboard: {error}"))
-    })?;
+    open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let original = match capture_open_clipboard() {
         Ok(Some(original)) => original,
         Ok(None) => {
@@ -598,10 +590,7 @@ unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<(Vec<Clipboar
             FlowError::Windows(format!("Could not clear the clipboard: {error}"))
         })?;
         set_delayed_clipboard_text()?;
-        let history_format = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
-        if history_format != 0 {
-            let _ = write_clipboard_dword(history_format, 0);
-        }
+        exclude_from_clipboard_services();
         Ok(())
     })();
     let _ = CloseClipboard();
@@ -635,8 +624,26 @@ unsafe fn set_delayed_clipboard_text() -> Result<()> {
     Ok(())
 }
 
+unsafe fn exclude_from_clipboard_services() {
+    // These markers are best-effort so a platform that rejects one still pastes.
+    for name in [
+        w!("CanIncludeInClipboardHistory"),
+        w!("CanUploadToCloudClipboard"),
+        w!("ExcludeClipboardContentFromMonitorProcessing"),
+    ] {
+        let format = RegisterClipboardFormatW(name);
+        if format != 0 {
+            let _ = write_clipboard_dword(format, 0);
+        }
+    }
+}
+
 unsafe fn capture_open_clipboard() -> Result<Option<Vec<ClipboardItem>>> {
+    const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
+    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
     let mut items = Vec::new();
+    let mut total_bytes: usize = 0;
     let mut previous_format = 0;
     loop {
         SetLastError(ERROR_SUCCESS);
@@ -659,6 +666,12 @@ unsafe fn capture_open_clipboard() -> Result<Option<Vec<ClipboardItem>>> {
         if size == 0 {
             return Ok(None);
         }
+        let Some(next_total) = total_bytes.checked_add(size) else {
+            return Ok(None);
+        };
+        if size > MAX_ITEM_BYTES || next_total > MAX_TOTAL_BYTES {
+            return Ok(None);
+        }
         let pointer = GlobalLock(allocation).cast::<u8>();
         if pointer.is_null() {
             return Ok(None);
@@ -667,6 +680,7 @@ unsafe fn capture_open_clipboard() -> Result<Option<Vec<ClipboardItem>>> {
             format,
             data: std::slice::from_raw_parts(pointer, size).to_vec(),
         });
+        total_bytes = next_total;
         let _ = GlobalUnlock(allocation);
         previous_format = format;
     }
@@ -683,8 +697,10 @@ fn is_hglobal_clipboard_format(format: u32) -> bool {
 }
 
 unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {
-    OpenClipboard(clipboard_owner()?)
-        .map_err(|error| FlowError::Windows(format!("Could not restore the clipboard: {error}")))?;
+    open_clipboard_with_retry(
+        clipboard_owner()?,
+        "Could not restore the clipboard; temporary dictation text may remain",
+    )?;
     let result = (|| {
         EmptyClipboard().map_err(|error| {
             FlowError::Windows(format!("Could not clear the temporary clipboard: {error}"))
@@ -718,6 +734,25 @@ unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {
     })();
     let _ = CloseClipboard();
     result
+}
+
+unsafe fn open_clipboard_with_retry(owner: HWND, context: &str) -> Result<()> {
+    const ATTEMPTS: u32 = 10;
+
+    let mut last_error = None;
+    for attempt in 0..ATTEMPTS {
+        match OpenClipboard(owner) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < ATTEMPTS {
+            thread::sleep(Duration::from_millis(5 * u64::from(attempt + 1)));
+        }
+    }
+    Err(FlowError::Windows(format!(
+        "{context} after {ATTEMPTS} attempts: {}",
+        last_error.expect("at least one clipboard attempt failed")
+    )))
 }
 
 unsafe fn ensure_clipboard_render_handler(owner: HWND) -> Result<()> {
