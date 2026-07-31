@@ -2,7 +2,7 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc, Condvar, Mutex, OnceLock,
+        mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
@@ -597,10 +597,11 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
 
 struct ClipboardRenderState {
     wide: Vec<u16>,
+    original: Arc<Vec<ClipboardItem>>,
     target_hwnd: isize,
     target_process_ids: Vec<u32>,
-    paste_armed: bool,
-    rendered: Option<std::result::Result<bool, String>>,
+    shortcut_sent: bool,
+    rendered: Option<std::result::Result<(), String>>,
 }
 
 struct ClipboardItem {
@@ -611,7 +612,7 @@ struct ClipboardItem {
 unsafe fn prepare_temporary_clipboard(
     target: HWND,
     text: &str,
-) -> Result<Option<Vec<ClipboardItem>>> {
+) -> Result<Option<Arc<Vec<ClipboardItem>>>> {
     let owner = clipboard_owner()?;
     ensure_clipboard_render_handler(owner)?;
     let mut target_process_id = 0;
@@ -627,7 +628,7 @@ unsafe fn prepare_temporary_clipboard(
     }
     open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let original = match capture_open_clipboard() {
-        Ok(Some(original)) => original,
+        Ok(Some(original)) => Arc::new(original),
         Ok(None) => {
             let _ = CloseClipboard();
             return Ok(None);
@@ -642,9 +643,10 @@ unsafe fn prepare_temporary_clipboard(
         Ok(mut state) => {
             *state = Some(ClipboardRenderState {
                 wide,
+                original: Arc::clone(&original),
                 target_hwnd: target.0 as isize,
                 target_process_ids,
-                paste_armed: false,
+                shortcut_sent: false,
                 rendered: None,
             });
         }
@@ -828,7 +830,10 @@ fn is_hglobal_clipboard_format(format: u32) -> bool {
 }
 
 unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {
-    let flow_owner = clipboard_owner()?;
+    restore_clipboard_for_owner(clipboard_owner()?, items)
+}
+
+unsafe fn restore_clipboard_for_owner(flow_owner: HWND, items: &[ClipboardItem]) -> Result<()> {
     open_clipboard_with_retry(
         flow_owner,
         "Could not restore the clipboard; temporary dictation text may remain",
@@ -931,31 +936,41 @@ unsafe extern "system" fn clipboard_window_proc(
     _subclass_id: usize,
     _reference_data: usize,
 ) -> LRESULT {
+    if message == WM_RENDERALLFORMATS {
+        let original = CLIPBOARD_RENDER_STATE
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|state| Arc::clone(&state.original)));
+        if let Some(original) = original {
+            // The main window is being destroyed while it still owns delayed
+            // text. Restore the captured clipboard before this process exits.
+            let _ = restore_clipboard_for_owner(hwnd, &original);
+            return LRESULT(0);
+        }
+    }
     if message == WM_RENDERFORMAT && wparam.0 as u32 == CF_UNICODETEXT {
         if let Ok(mut guard) = CLIPBOARD_RENDER_STATE.lock() {
             if let Some(state) = guard.as_mut() {
-                let (should_render, target_identified) = match GetOpenClipboardWindow() {
+                let requested_by_target = match GetOpenClipboardWindow() {
                     Ok(requester) => {
                         let mut requester_process_id = 0;
-                        let requested_by_target = state.paste_armed
+                        state.shortcut_sent
                             && GetWindowThreadProcessId(requester, Some(&mut requester_process_id))
                                 != 0
-                            && state.target_process_ids.contains(&requester_process_id);
-                        (requested_by_target, requested_by_target)
+                            && state.target_process_ids.contains(&requester_process_id)
                     }
-                    Err(_) => (
-                        state.paste_armed && GetForegroundWindow().0 as isize == state.target_hwnd,
-                        false,
-                    ),
+                    Err(_) => {
+                        state.shortcut_sent && GetForegroundWindow().0 as isize == state.target_hwnd
+                    }
                 };
-                if !should_render {
+                if !requested_by_target {
                     // Keep the format delayed when a clipboard monitor asks first;
                     // only the dictation target may materialize the temporary text.
                     return LRESULT(0);
                 }
                 state.rendered = Some(
                     write_clipboard_wide(&state.wide)
-                        .map(|_| target_identified)
+                        .map(|_| ())
                         .map_err(|error| error.to_string()),
                 );
                 CLIPBOARD_RENDERED.notify_all();
@@ -973,33 +988,22 @@ unsafe fn send_armed_paste_shortcut() -> Result<()> {
     let state = guard
         .as_mut()
         .ok_or_else(|| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
-    state.paste_armed = true;
-    send_paste_shortcut()
+    let result = send_paste_shortcut();
+    state.shortcut_sent = result.is_ok();
+    result
 }
 
 fn wait_for_temporary_clipboard_request(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let expected_owner = clipboard_owner()?;
-    let mut ownerless_render = false;
     let mut guard = CLIPBOARD_RENDER_STATE
         .lock()
         .map_err(|_| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
     loop {
         if let Some(result) = guard.as_ref().and_then(|state| state.rendered.as_ref()) {
-            match result {
-                Ok(true) => return Ok(()),
-                Ok(false) => {
-                    // OpenClipboard(NULL) provides no requester identity. Keep the
-                    // text available for the full timeout so a clipboard monitor
-                    // cannot make Flow restore it before the target consumes it.
-                    ownerless_render = true;
-                }
-                Err(error) => {
-                    return Err(FlowError::Windows(format!(
-                        "Could not render the paste: {error}"
-                    )));
-                }
-            }
+            return result.clone().map_err(|error| {
+                FlowError::Windows(format!("Could not render the paste: {error}"))
+            });
         }
         if unsafe { GetClipboardOwner() }.map_or(true, |owner| owner.0 != expected_owner.0) {
             return Err(FlowError::Windows(
@@ -1008,9 +1012,6 @@ fn wait_for_temporary_clipboard_request(timeout: Duration) -> Result<()> {
         }
         let now = Instant::now();
         if now >= deadline {
-            if ownerless_render {
-                return Ok(());
-            }
             return Err(FlowError::Windows(
                 "The destination did not request the dictation from the clipboard.".into(),
             ));
