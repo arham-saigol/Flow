@@ -2,17 +2,20 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc, Mutex, OnceLock,
+        mpsc, Condvar, Mutex, OnceLock,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{AppHandle, Manager};
 use windows::{
     core::{w, PCWSTR},
     Win32::{
-        Foundation::{GlobalFree, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{
+            GetLastError, GlobalFree, SetLastError, ERROR_SUCCESS, HGLOBAL, HINSTANCE, HWND,
+            LPARAM, LRESULT, POINT, WPARAM,
+        },
         System::{
             DataExchange::{
                 CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
@@ -24,17 +27,19 @@ use windows::{
         },
         UI::{
             Input::KeyboardAndMouse::{
-                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-                KEYEVENTF_KEYUP, VK_CONTROL, VK_ESCAPE,
+                GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL, VK_ESCAPE,
+                VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
             },
+            Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
                 SetForegroundWindow, SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK,
                 KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT,
                 WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
                 WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-                WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, XBUTTON1,
+                WM_RBUTTONUP, WM_RENDERFORMAT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+                WM_XBUTTONUP, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, XBUTTON1,
             },
         },
     },
@@ -55,6 +60,10 @@ static MOUSE_BUTTONS_DOWN: AtomicU32 = AtomicU32::new(0);
 static LAST_LEFT_CTRL_DOWN: AtomicU32 = AtomicU32::new(0);
 static LAST_TARGET: Mutex<Option<TargetWindow>> = Mutex::new(None);
 static RECORDING: AtomicBool = AtomicBool::new(false);
+static CLIPBOARD_OPERATION: Mutex<()> = Mutex::new(());
+static CLIPBOARD_RENDER_STATE: Mutex<Option<ClipboardRenderState>> = Mutex::new(None);
+static CLIPBOARD_RENDERED: Condvar = Condvar::new();
+static CLIPBOARD_RENDER_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 pub struct TargetWindow {
@@ -125,6 +134,9 @@ pub fn set_recording(recording: bool) {
 pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
     APP.set(app)
         .map_err(|_| FlowError::Windows("The keyboard handler was already initialized.".into()))?;
+    unsafe {
+        ensure_clipboard_render_handler(clipboard_owner()?)?;
+    }
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("flow-keyboard-hook".into())
@@ -405,6 +417,9 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
 }
 
 pub fn copy_text(text: &str) -> Result<()> {
+    let _operation = CLIPBOARD_OPERATION
+        .lock()
+        .map_err(|_| FlowError::Windows("The clipboard handler is unavailable.".into()))?;
     unsafe { write_clipboard_text(text, true) }
 }
 
@@ -420,41 +435,15 @@ unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<(
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     OpenClipboard(clipboard_owner()?)
         .map_err(|error| FlowError::Windows(format!("Could not open the clipboard: {error}")))?;
-    let allocation = match GlobalAlloc(GMEM_MOVEABLE, wide.len() * size_of::<u16>()) {
-        Ok(allocation) => allocation,
-        Err(error) => {
-            let _ = CloseClipboard();
-            return Err(FlowError::Windows(format!(
-                "Could not allocate clipboard memory: {error}"
-            )));
-        }
-    };
-    let pointer = GlobalLock(allocation).cast::<u16>();
-    if pointer.is_null() {
-        let _ = GlobalFree(allocation);
-        let _ = CloseClipboard();
-        return Err(FlowError::Windows(
-            "Could not access clipboard memory.".into(),
-        ));
-    }
-    std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
-    let _ = GlobalUnlock(allocation);
     if let Err(error) = EmptyClipboard() {
-        let _ = GlobalFree(allocation);
         let _ = CloseClipboard();
         return Err(FlowError::Windows(format!(
             "Could not clear the clipboard: {error}"
         )));
     }
-    if let Err(error) = SetClipboardData(
-        CF_UNICODETEXT,
-        windows::Win32::Foundation::HANDLE(allocation.0),
-    ) {
-        let _ = GlobalFree(allocation);
+    if let Err(error) = write_clipboard_wide(&wide) {
         let _ = CloseClipboard();
-        return Err(FlowError::Windows(format!(
-            "Could not write to the clipboard: {error}"
-        )));
+        return Err(error);
     }
     if !include_in_history {
         // Windows honors this registered format when clipboard history is enabled.
@@ -465,6 +454,31 @@ unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<(
         }
     }
     let _ = CloseClipboard();
+    Ok(())
+}
+
+unsafe fn write_clipboard_wide(wide: &[u16]) -> Result<()> {
+    let allocation = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(wide)).map_err(|error| {
+        FlowError::Windows(format!("Could not allocate clipboard memory: {error}"))
+    })?;
+    let pointer = GlobalLock(allocation).cast::<u16>();
+    if pointer.is_null() {
+        let _ = GlobalFree(allocation);
+        return Err(FlowError::Windows(
+            "Could not access clipboard memory.".into(),
+        ));
+    }
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
+    let _ = GlobalUnlock(allocation);
+    if let Err(error) = SetClipboardData(
+        CF_UNICODETEXT,
+        windows::Win32::Foundation::HANDLE(allocation.0),
+    ) {
+        let _ = GlobalFree(allocation);
+        return Err(FlowError::Windows(format!(
+            "Could not write to the clipboard: {error}"
+        )));
+    }
     Ok(())
 }
 
@@ -491,31 +505,40 @@ unsafe fn write_clipboard_dword(format: u32, value: u32) -> Result<()> {
 }
 
 fn paste_via_clipboard(text: &str) -> Result<()> {
+    let _operation = CLIPBOARD_OPERATION
+        .lock()
+        .map_err(|_| FlowError::Windows("The clipboard handler is unavailable.".into()))?;
     unsafe {
-        let original_sequence = GetClipboardSequenceNumber();
-        let original = capture_clipboard()?;
-        let mut temporary_sequence = None;
+        if !wait_for_shortcut_modifiers(Duration::from_secs(1)) {
+            return Err(FlowError::Windows(
+                "Release Ctrl, Shift, Alt, Windows, or V before Flow pastes the dictation.".into(),
+            ));
+        }
+
+        let Some((original, mut temporary_sequence)) = prepare_temporary_clipboard(text)? else {
+            return send_unicode(text);
+        };
         let paste_result = (|| {
-            write_clipboard_text(text, false)?;
-            temporary_sequence = Some(GetClipboardSequenceNumber());
             send_paste_shortcut()?;
-            // SendInput queues the shortcut. Give the destination time to consume
-            // the clipboard before putting the user's previous content back.
-            thread::sleep(Duration::from_millis(100));
+            temporary_sequence =
+                wait_for_temporary_clipboard_request(temporary_sequence, Duration::from_secs(5))?;
+            // WM_RENDERFORMAT confirms that the target requested the text. Give
+            // GetClipboardData a short grace period to copy the rendered handle.
+            thread::sleep(Duration::from_millis(50));
             Ok(())
         })();
 
         let current_sequence = GetClipboardSequenceNumber();
-        let should_restore = temporary_sequence
-            .map(|sequence| current_sequence == sequence)
-            .unwrap_or(current_sequence != original_sequence);
-        let restore_result = if should_restore {
+        let restore_result = if current_sequence == temporary_sequence {
             restore_clipboard(&original)
         } else {
             // Another application or the user intentionally replaced the temporary
             // clipboard content. Do not overwrite that newer value.
             Ok(())
         };
+        if let Ok(mut state) = CLIPBOARD_RENDER_STATE.lock() {
+            *state = None;
+        }
 
         match (paste_result, restore_result) {
             (Ok(()), Ok(())) => Ok(()),
@@ -528,47 +551,129 @@ fn paste_via_clipboard(text: &str) -> Result<()> {
     }
 }
 
+struct ClipboardRenderState {
+    wide: Vec<u16>,
+    rendered: Option<std::result::Result<u32, String>>,
+}
+
 struct ClipboardItem {
     format: u32,
     data: Vec<u8>,
 }
 
-unsafe fn capture_clipboard() -> Result<Vec<ClipboardItem>> {
-    OpenClipboard(clipboard_owner()?).map_err(|error| {
+unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<(Vec<ClipboardItem>, u32)>> {
+    let owner = clipboard_owner()?;
+    ensure_clipboard_render_handler(owner)?;
+    OpenClipboard(owner).map_err(|error| {
         FlowError::Windows(format!("Could not preserve the clipboard: {error}"))
     })?;
-    let result = (|| {
-        let had_formats = CountClipboardFormats() > 0;
-        let mut items = Vec::new();
-        let mut format = EnumClipboardFormats(0);
-        while format != 0 {
-            if is_hglobal_clipboard_format(format) {
-                if let Ok(handle) = GetClipboardData(format) {
-                    let allocation = HGLOBAL(handle.0);
-                    let size = GlobalSize(allocation);
-                    if size > 0 {
-                        let pointer = GlobalLock(allocation).cast::<u8>();
-                        if !pointer.is_null() {
-                            items.push(ClipboardItem {
-                                format,
-                                data: std::slice::from_raw_parts(pointer, size).to_vec(),
-                            });
-                            let _ = GlobalUnlock(allocation);
-                        }
-                    }
-                }
-            }
-            format = EnumClipboardFormats(format);
+    let original = match capture_open_clipboard() {
+        Ok(Some(original)) => original,
+        Ok(None) => {
+            let _ = CloseClipboard();
+            return Ok(None);
         }
-        if had_formats && items.is_empty() {
+        Err(error) => {
+            let _ = CloseClipboard();
+            return Err(error);
+        }
+    };
+    let wide = text.encode_utf16().chain(std::iter::once(0)).collect();
+    match CLIPBOARD_RENDER_STATE.lock() {
+        Ok(mut state) => {
+            *state = Some(ClipboardRenderState {
+                wide,
+                rendered: None,
+            });
+        }
+        Err(_) => {
+            let _ = CloseClipboard();
             return Err(FlowError::Windows(
-                "The current clipboard format could not be preserved safely.".into(),
+                "The clipboard renderer is unavailable.".into(),
             ));
         }
-        Ok(items)
+    }
+    let replace_result = (|| {
+        EmptyClipboard().map_err(|error| {
+            FlowError::Windows(format!("Could not clear the clipboard: {error}"))
+        })?;
+        set_delayed_clipboard_text()?;
+        let history_format = RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory"));
+        if history_format != 0 {
+            let _ = write_clipboard_dword(history_format, 0);
+        }
+        Ok(())
     })();
     let _ = CloseClipboard();
-    result
+    if let Err(replace_error) = replace_result {
+        if let Ok(mut state) = CLIPBOARD_RENDER_STATE.lock() {
+            *state = None;
+        }
+        return match restore_clipboard(&original) {
+            Ok(()) => Err(replace_error),
+            Err(restore_error) => Err(FlowError::Windows(format!(
+                "{replace_error} The previous clipboard also could not be restored: {restore_error}"
+            ))),
+        };
+    }
+    Ok(Some((original, GetClipboardSequenceNumber())))
+}
+
+unsafe fn set_delayed_clipboard_text() -> Result<()> {
+    SetLastError(ERROR_SUCCESS);
+    let result = SetClipboardData(
+        CF_UNICODETEXT,
+        windows::Win32::Foundation::HANDLE::default(),
+    );
+    let error = GetLastError();
+    if result.is_err() && error != ERROR_SUCCESS {
+        return Err(FlowError::Windows(format!(
+            "Could not prepare the clipboard (Windows error {}).",
+            error.0
+        )));
+    }
+    Ok(())
+}
+
+unsafe fn capture_open_clipboard() -> Result<Option<Vec<ClipboardItem>>> {
+    let mut items = Vec::new();
+    let mut previous_format = 0;
+    loop {
+        SetLastError(ERROR_SUCCESS);
+        let format = EnumClipboardFormats(previous_format);
+        if format == 0 {
+            if GetLastError() != ERROR_SUCCESS {
+                return Ok(None);
+            }
+            break;
+        }
+        if !is_hglobal_clipboard_format(format) {
+            return Ok(None);
+        }
+        let handle = match GetClipboardData(format) {
+            Ok(handle) => handle,
+            Err(_) => return Ok(None),
+        };
+        let allocation = HGLOBAL(handle.0);
+        let size = GlobalSize(allocation);
+        if size == 0 {
+            return Ok(None);
+        }
+        let pointer = GlobalLock(allocation).cast::<u8>();
+        if pointer.is_null() {
+            return Ok(None);
+        }
+        items.push(ClipboardItem {
+            format,
+            data: std::slice::from_raw_parts(pointer, size).to_vec(),
+        });
+        let _ = GlobalUnlock(allocation);
+        previous_format = format;
+    }
+    if CountClipboardFormats() > 0 && items.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(items))
 }
 
 fn is_hglobal_clipboard_format(format: u32) -> bool {
@@ -615,6 +720,99 @@ unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {
     result
 }
 
+unsafe fn ensure_clipboard_render_handler(owner: HWND) -> Result<()> {
+    if CLIPBOARD_RENDER_HANDLER_INSTALLED.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if !SetWindowSubclass(owner, Some(clipboard_window_proc), 0x464C4F57, 0).as_bool() {
+        return Err(FlowError::Windows(
+            "Could not initialize the clipboard renderer.".into(),
+        ));
+    }
+    CLIPBOARD_RENDER_HANDLER_INSTALLED.store(true, Ordering::Release);
+    Ok(())
+}
+
+unsafe extern "system" fn clipboard_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    _subclass_id: usize,
+    _reference_data: usize,
+) -> LRESULT {
+    if message == WM_RENDERFORMAT && wparam.0 as u32 == CF_UNICODETEXT {
+        if let Ok(mut guard) = CLIPBOARD_RENDER_STATE.lock() {
+            if let Some(state) = guard.as_mut() {
+                state.rendered = Some(
+                    write_clipboard_wide(&state.wide)
+                        .map(|_| GetClipboardSequenceNumber())
+                        .map_err(|error| error.to_string()),
+                );
+                CLIPBOARD_RENDERED.notify_all();
+            }
+        }
+        return LRESULT(0);
+    }
+    DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+fn wait_for_temporary_clipboard_request(sequence: u32, timeout: Duration) -> Result<u32> {
+    let deadline = Instant::now() + timeout;
+    let mut guard = CLIPBOARD_RENDER_STATE
+        .lock()
+        .map_err(|_| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
+    loop {
+        if let Some(result) = guard.as_ref().and_then(|state| state.rendered.as_ref()) {
+            return result.clone().map_err(|error| {
+                FlowError::Windows(format!("Could not render the paste: {error}"))
+            });
+        }
+        if unsafe { GetClipboardSequenceNumber() } != sequence {
+            return Err(FlowError::Windows(
+                "The clipboard changed before the destination requested the dictation.".into(),
+            ));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(FlowError::Windows(
+                "The destination did not request the dictation from the clipboard.".into(),
+            ));
+        }
+        let wait = (deadline - now).min(Duration::from_millis(50));
+        let (next_guard, _) = CLIPBOARD_RENDERED
+            .wait_timeout(guard, wait)
+            .map_err(|_| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
+        guard = next_guard;
+    }
+}
+
+fn wait_for_shortcut_modifiers(timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while unsafe {
+        [
+            VK_CONTROL.0,
+            VK_SHIFT.0,
+            VK_MENU.0,
+            VK_LWIN.0,
+            VK_RWIN.0,
+            0x56,
+        ]
+        .into_iter()
+        .any(|key| key_is_down(key))
+    } {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    true
+}
+
+unsafe fn key_is_down(key: u16) -> bool {
+    GetAsyncKeyState(key as i32) as u16 & 0x8000 != 0
+}
+
 unsafe fn send_paste_shortcut() -> Result<()> {
     send_inputs(&[
         key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
@@ -622,6 +820,46 @@ unsafe fn send_paste_shortcut() -> Result<()> {
         key_input(0x56, 0, KEYEVENTF_KEYUP),
         key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
     ])
+}
+
+unsafe fn send_unicode(text: &str) -> Result<()> {
+    const INPUTS_PER_CHUNK: usize = 128;
+
+    let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\r' {
+            if characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
+        } else if character == '\n' {
+            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
+            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
+        } else {
+            let mut encoded = [0_u16; 2];
+            for unit in character.encode_utf16(&mut encoded) {
+                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE));
+                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            }
+        }
+    }
+
+    for chunk in inputs.chunks(INPUTS_PER_CHUNK) {
+        let mut sent = 0;
+        while sent < chunk.len() {
+            let inserted = SendInput(&chunk[sent..], size_of::<INPUT>() as i32) as usize;
+            if inserted == 0 {
+                return Err(FlowError::Windows(format!(
+                    "Windows accepted {sent} of {} keyboard input events in the current chunk.",
+                    chunk.len()
+                )));
+            }
+            sent += inserted;
+        }
+    }
+    Ok(())
 }
 
 unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
