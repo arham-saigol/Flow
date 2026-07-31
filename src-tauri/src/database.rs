@@ -408,7 +408,7 @@ fn validate_dictionary_entry(
     if correction.is_some_and(str::is_empty) {
         return Err(FlowError::Message("Enter the correct spelling.".into()));
     }
-    if correction.is_some_and(|correction| correction.to_lowercase() == value.to_lowercase()) {
+    if correction.is_some_and(|correction| correction == value) {
         return Err(FlowError::Message(
             "The misspelling and correction must be different.".into(),
         ));
@@ -524,8 +524,14 @@ mod tests {
         assert_eq!(entries[0].value, "Flow");
         assert_eq!(entries[0].correction, None);
 
-        let error = database
+        database
             .update_dictionary(entry.id, "same", Some("SAME"))
+            .unwrap();
+        let entries = database.dictionary().unwrap();
+        assert_eq!(entries[0].correction.as_deref(), Some("SAME"));
+
+        let error = database
+            .update_dictionary(entry.id, "same", Some("same"))
             .unwrap_err();
         assert_eq!(
             error.to_string(),
