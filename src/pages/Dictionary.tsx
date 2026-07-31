@@ -55,7 +55,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     if (
       !next ||
       (correctingMisspelling &&
-        (!nextCorrection || next.toLocaleLowerCase() === nextCorrection.toLocaleLowerCase()))
+        (!nextCorrection || next === nextCorrection))
     ) return;
     setAdding(true);
     try {
@@ -76,7 +76,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     Boolean(value.trim()) &&
     (!correctingMisspelling ||
       (Boolean(correction.trim()) &&
-        value.trim().toLocaleLowerCase() !== correction.trim().toLocaleLowerCase()));
+        value.trim() !== correction.trim()));
 
   return (
     <section className="page page--narrow">

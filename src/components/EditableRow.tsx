@@ -46,7 +46,7 @@ export function EditableRow({
     if (
       !next ||
       (correctingMisspelling &&
-        (!nextCorrection || next.toLocaleLowerCase() === nextCorrection.toLocaleLowerCase()))
+        (!nextCorrection || next === nextCorrection))
     ) return;
     setSaving(true);
     try {
@@ -68,7 +68,7 @@ export function EditableRow({
     Boolean(draft.trim()) &&
     (!correctingMisspelling ||
       (Boolean(draftCorrection.trim()) &&
-        draft.trim().toLocaleLowerCase() !== draftCorrection.trim().toLocaleLowerCase()));
+        draft.trim() !== draftCorrection.trim()));
 
   return (
     <div className="flat-row">
