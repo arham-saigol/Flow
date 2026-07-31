@@ -401,6 +401,9 @@ fn validate_dictionary_entry(
     if value.is_empty() {
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
+    if correction.is_some() && crate::workflow::normalize_utterance(value).is_empty() {
+        return Err(FlowError::Message("Enter a word or name.".into()));
+    }
     let correction = correction.map(str::trim);
     if correction.is_some_and(str::is_empty) {
         return Err(FlowError::Message("Enter the correct spelling.".into()));
@@ -541,6 +544,9 @@ mod tests {
             .add_dictionary("four word", Some("Forward"))
             .unwrap();
         let regular = database.add_dictionary("foo.", None).unwrap();
+
+        let empty_source_error = database.add_dictionary("...", Some("Forward")).unwrap_err();
+        assert_eq!(empty_source_error.to_string(), "Enter a word or name.");
 
         let add_error = database
             .add_dictionary("four   word.", Some("Foreword"))
