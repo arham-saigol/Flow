@@ -254,7 +254,12 @@ fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> 
     let normalized = normalize_utterance(value);
     let mut corrections = corrections
         .iter()
-        .map(|(incorrect, correct)| (normalize_utterance(incorrect), normalize_utterance(correct)))
+        .map(|(incorrect, correct)| {
+            (
+                normalize_utterance(incorrect),
+                normalize_correction_replacement(correct),
+            )
+        })
         .filter(|(incorrect, correct)| !incorrect.is_empty() && !correct.is_empty())
         .collect::<Vec<_>>();
     corrections.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
@@ -287,7 +292,15 @@ fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> 
             index += character.len_utf8();
         }
     }
-    corrected
+    normalize_utterance(&corrected)
+}
+
+fn normalize_correction_replacement(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 fn friendly_error(error: FlowError) -> String {
@@ -339,7 +352,10 @@ mod tests {
 
     #[test]
     fn dictionary_corrections_apply_before_snippet_matching() {
-        let corrections = vec![("four word".into(), "Forward".into())];
+        let corrections = vec![
+            ("four word".into(), "Forward".into()),
+            ("see sharp".into(), "C#".into()),
+        ];
         assert_eq!(
             normalize_with_corrections("Please, four word now.", &corrections),
             "please, forward now"
@@ -347,6 +363,10 @@ mod tests {
         assert_eq!(
             normalize_with_corrections("four words", &corrections),
             "four words"
+        );
+        assert_eq!(
+            normalize_with_corrections("see sharp project", &corrections),
+            "c# project"
         );
     }
 }
