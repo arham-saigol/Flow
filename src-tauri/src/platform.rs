@@ -576,7 +576,7 @@ struct ClipboardRenderState {
     target_hwnd: isize,
     target_process_id: u32,
     paste_armed: bool,
-    rendered: Option<std::result::Result<u32, String>>,
+    rendered: Option<std::result::Result<(u32, bool), String>>,
 }
 
 struct ClipboardItem {
@@ -845,26 +845,28 @@ unsafe extern "system" fn clipboard_window_proc(
     if message == WM_RENDERFORMAT && wparam.0 as u32 == CF_UNICODETEXT {
         if let Ok(mut guard) = CLIPBOARD_RENDER_STATE.lock() {
             if let Some(state) = guard.as_mut() {
-                let requested_by_target = match GetOpenClipboardWindow() {
+                let (should_render, target_identified) = match GetOpenClipboardWindow() {
                     Ok(requester) => {
                         let mut requester_process_id = 0;
-                        state.paste_armed
+                        let requested_by_target = state.paste_armed
                             && GetWindowThreadProcessId(requester, Some(&mut requester_process_id))
                                 != 0
-                            && requester_process_id == state.target_process_id
+                            && requester_process_id == state.target_process_id;
+                        (requested_by_target, requested_by_target)
                     }
-                    Err(_) => {
-                        state.paste_armed && GetForegroundWindow().0 as isize == state.target_hwnd
-                    }
+                    Err(_) => (
+                        state.paste_armed && GetForegroundWindow().0 as isize == state.target_hwnd,
+                        false,
+                    ),
                 };
-                if !requested_by_target {
+                if !should_render {
                     // Keep the format delayed when a clipboard monitor asks first;
                     // only the dictation target may materialize the temporary text.
                     return LRESULT(0);
                 }
                 state.rendered = Some(
                     write_clipboard_wide(&state.wide)
-                        .map(|_| GetClipboardSequenceNumber())
+                        .map(|_| (GetClipboardSequenceNumber(), target_identified))
                         .map_err(|error| error.to_string()),
                 );
                 CLIPBOARD_RENDERED.notify_all();
@@ -886,16 +888,29 @@ unsafe fn send_armed_paste_shortcut() -> Result<()> {
     send_paste_shortcut()
 }
 
-fn wait_for_temporary_clipboard_request(sequence: u32, timeout: Duration) -> Result<u32> {
+fn wait_for_temporary_clipboard_request(mut sequence: u32, timeout: Duration) -> Result<u32> {
     let deadline = Instant::now() + timeout;
+    let mut ownerless_render = None;
     let mut guard = CLIPBOARD_RENDER_STATE
         .lock()
         .map_err(|_| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
     loop {
         if let Some(result) = guard.as_ref().and_then(|state| state.rendered.as_ref()) {
-            return result.clone().map_err(|error| {
-                FlowError::Windows(format!("Could not render the paste: {error}"))
-            });
+            match result {
+                Ok((rendered_sequence, true)) => return Ok(*rendered_sequence),
+                Ok((rendered_sequence, false)) => {
+                    // OpenClipboard(NULL) provides no requester identity. Keep the
+                    // text available for the full timeout so a clipboard monitor
+                    // cannot make Flow restore it before the target consumes it.
+                    sequence = *rendered_sequence;
+                    ownerless_render = Some(*rendered_sequence);
+                }
+                Err(error) => {
+                    return Err(FlowError::Windows(format!(
+                        "Could not render the paste: {error}"
+                    )));
+                }
+            }
         }
         if unsafe { GetClipboardSequenceNumber() } != sequence {
             return Err(FlowError::Windows(
@@ -904,6 +919,9 @@ fn wait_for_temporary_clipboard_request(sequence: u32, timeout: Duration) -> Res
         }
         let now = Instant::now();
         if now >= deadline {
+            if let Some(rendered_sequence) = ownerless_render {
+                return Ok(rendered_sequence);
+            }
             return Err(FlowError::Windows(
                 "The destination did not request the dictation from the clipboard.".into(),
             ));
@@ -945,12 +963,48 @@ unsafe fn key_is_down(key: u16) -> bool {
 }
 
 unsafe fn send_paste_shortcut() -> Result<()> {
-    send_inputs(&[
+    let inputs = [
         key_input(VK_CONTROL.0, 0, KEYBD_EVENT_FLAGS(0)),
         key_input(0x56, 0, KEYBD_EVENT_FLAGS(0)), // V
         key_input(0x56, 0, KEYEVENTF_KEYUP),
         key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
-    ])
+    ];
+    let inserted = SendInput(&inputs, size_of::<INPUT>() as i32) as usize;
+    if inserted == inputs.len() {
+        return Ok(());
+    }
+
+    let control_up = [key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP)];
+    let v_and_control_up = [
+        key_input(0x56, 0, KEYEVENTF_KEYUP),
+        key_input(VK_CONTROL.0, 0, KEYEVENTF_KEYUP),
+    ];
+    let cleanup: &[INPUT] = match inserted {
+        1 | 3 => &control_up,
+        2 => &v_and_control_up,
+        _ => &[],
+    };
+    let mut released = 0;
+    while released < cleanup.len() {
+        let count = SendInput(&cleanup[released..], size_of::<INPUT>() as i32) as usize;
+        if count == 0 {
+            break;
+        }
+        released += count;
+    }
+
+    let cleanup_status = if released == cleanup.len() {
+        "Injected key-downs were released.".to_string()
+    } else {
+        format!(
+            "Windows accepted {released} of {} cleanup events.",
+            cleanup.len()
+        )
+    };
+    Err(FlowError::Windows(format!(
+        "Windows accepted {inserted} of {} paste shortcut events. {cleanup_status}",
+        inputs.len()
+    )))
 }
 
 unsafe fn send_unicode(text: &str) -> Result<()> {
