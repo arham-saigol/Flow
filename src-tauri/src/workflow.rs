@@ -96,7 +96,7 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
             .transcribe(&api_key, recording.wav, &preferred_spellings)
             .await?;
 
-        let normalized = normalize_utterance(&transcript);
+        let normalized = normalize_with_corrections(&transcript, &corrections);
         let snippet = state
             .database
             .snippets()?
@@ -250,6 +250,46 @@ pub(crate) fn normalize_utterance(value: &str) -> String {
         .to_lowercase()
 }
 
+fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> String {
+    let normalized = normalize_utterance(value);
+    let mut corrections = corrections
+        .iter()
+        .map(|(incorrect, correct)| (normalize_utterance(incorrect), normalize_utterance(correct)))
+        .filter(|(incorrect, correct)| !incorrect.is_empty() && !correct.is_empty())
+        .collect::<Vec<_>>();
+    corrections.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+
+    let mut corrected = String::with_capacity(normalized.len());
+    let mut index = 0;
+    while index < normalized.len() {
+        let matching = corrections.iter().find(|(incorrect, _)| {
+            let end = index + incorrect.len();
+            end <= normalized.len()
+                && normalized[index..].starts_with(incorrect)
+                && normalized[..index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| !character.is_alphanumeric())
+                && normalized[end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|character| !character.is_alphanumeric())
+        });
+        if let Some((incorrect, correct)) = matching {
+            corrected.push_str(correct);
+            index += incorrect.len();
+        } else {
+            let character = normalized[index..]
+                .chars()
+                .next()
+                .expect("index always points to a character boundary");
+            corrected.push(character);
+            index += character.len_utf8();
+        }
+    }
+    corrected
+}
+
 fn friendly_error(error: FlowError) -> String {
     match error {
         FlowError::Network(_) => {
@@ -273,7 +313,7 @@ async fn tokio_sleep(duration: std::time::Duration) {
 mod tests {
     use crate::models::DictionaryEntry;
 
-    use super::dictionary_guidance;
+    use super::{dictionary_guidance, normalize_with_corrections};
 
     #[test]
     fn regular_dictionary_words_never_reach_cleanup_guidance() {
@@ -295,5 +335,18 @@ mod tests {
         let (preferred_spellings, corrections) = dictionary_guidance(&entries);
         assert_eq!(preferred_spellings, ["Flow", "by the way"]);
         assert_eq!(corrections, [("btw".into(), "by the way".into())]);
+    }
+
+    #[test]
+    fn dictionary_corrections_apply_before_snippet_matching() {
+        let corrections = vec![("four word".into(), "Forward".into())];
+        assert_eq!(
+            normalize_with_corrections("Please, four word now.", &corrections),
+            "please, forward now"
+        );
+        assert_eq!(
+            normalize_with_corrections("four words", &corrections),
+            "four words"
+        );
     }
 }
