@@ -19,8 +19,8 @@ use windows::{
         System::{
             DataExchange::{
                 CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
-                GetClipboardData, GetClipboardSequenceNumber, GetOpenClipboardWindow,
-                OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+                GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber,
+                GetOpenClipboardWindow, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
@@ -34,11 +34,12 @@ use windows::{
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW,
-                GetWindowThreadProcessId, IsWindow, SetForegroundWindow, SetWindowLongPtrW,
-                SetWindowsHookExW, GWL_EXSTYLE, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-                LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-                WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-                WM_MOUSEHWHEEL, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RENDERFORMAT,
+                GetWindowThreadProcessId, IsWindow, SendMessageTimeoutW, SetForegroundWindow,
+                SetWindowLongPtrW, SetWindowsHookExW, GWL_EXSTYLE, HHOOK, KBDLLHOOKSTRUCT,
+                LLKHF_EXTENDED, LLKHF_INJECTED, MSG, MSLLHOOKSTRUCT, SMTO_ABORTIFHUNG, SMTO_BLOCK,
+                SMTO_ERRORONEXIT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL,
+                WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_RENDERALLFORMATS, WM_RENDERFORMAT,
                 WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW, XBUTTON1,
             },
@@ -433,7 +434,7 @@ fn clipboard_owner() -> Result<HWND> {
 }
 
 unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<()> {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide = encode_clipboard_text(text);
     let allocation = allocate_clipboard_wide(&wide)?;
     if let Err(error) =
         open_clipboard_with_retry(clipboard_owner()?, "Could not open the clipboard")
@@ -457,6 +458,27 @@ unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<(
     }
     let _ = CloseClipboard();
     Ok(())
+}
+
+fn encode_clipboard_text(text: &str) -> Vec<u16> {
+    let mut normalized = String::with_capacity(text.len() + 1);
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                normalized.push_str("\r\n");
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+            }
+            '\n' => normalized.push_str("\r\n"),
+            _ => normalized.push(character),
+        }
+    }
+    normalized
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 unsafe fn write_clipboard_wide(wide: &[u16]) -> Result<()> {
@@ -597,6 +619,9 @@ unsafe fn prepare_temporary_clipboard(
             "Could not identify the dictation target process.".into(),
         ));
     }
+    if !render_delayed_clipboard_with_timeout(owner) {
+        return Ok(None);
+    }
     open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let original = match capture_open_clipboard() {
         Ok(Some(original)) => original,
@@ -609,7 +634,7 @@ unsafe fn prepare_temporary_clipboard(
             return Err(error);
         }
     };
-    let wide = text.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide = encode_clipboard_text(text);
     match CLIPBOARD_RENDER_STATE.lock() {
         Ok(mut state) => {
             *state = Some(ClipboardRenderState {
@@ -649,6 +674,31 @@ unsafe fn prepare_temporary_clipboard(
         };
     }
     Ok(Some((original, temporary_sequence)))
+}
+
+unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> bool {
+    const RENDER_TIMEOUT_MS: u32 = 500;
+
+    let Ok(source_owner) = GetClipboardOwner() else {
+        return true;
+    };
+    if source_owner.0 == flow_owner.0 {
+        return true;
+    }
+
+    // GetClipboardData may otherwise synchronously wait forever for a hung
+    // owner to render delayed formats. Ask it to materialize those formats
+    // through a bounded message before Flow opens and reads the clipboard.
+    SendMessageTimeoutW(
+        source_owner,
+        WM_RENDERALLFORMATS,
+        WPARAM(0),
+        LPARAM(0),
+        SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+        RENDER_TIMEOUT_MS,
+        None,
+    )
+    .0 != 0
 }
 
 unsafe fn set_delayed_clipboard_text() -> Result<()> {
@@ -1109,5 +1159,21 @@ fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
                 dwExtraInfo: 0,
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_clipboard_text;
+
+    #[test]
+    fn clipboard_text_uses_cr_lf_line_endings() {
+        let wide = encode_clipboard_text("one\ntwo\rthree\r\nfour");
+
+        assert_eq!(wide.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&wide[..wide.len() - 1]).unwrap(),
+            "one\r\ntwo\r\nthree\r\nfour"
+        );
     }
 }
