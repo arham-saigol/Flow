@@ -234,7 +234,7 @@ fn dictionary_guidance(entries: &[DictionaryEntry]) -> (Vec<String>, Vec<(String
             entry
                 .correction
                 .as_ref()
-                .map(|correction| (entry.value.clone(), correction.clone()))
+                .map(|correction| (normalize_utterance(&entry.value), correction.clone()))
         })
         .collect();
     (preferred_spellings, corrections)
@@ -326,7 +326,7 @@ mod tests {
             },
             DictionaryEntry {
                 id: 2,
-                value: "btw".into(),
+                value: " btw. ".into(),
                 correction: Some("by the way".into()),
                 created_at: 2,
             },
