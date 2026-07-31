@@ -13,14 +13,18 @@ use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{
-            GetLastError, GlobalFree, SetLastError, ERROR_SUCCESS, HGLOBAL, HINSTANCE, HWND,
-            LPARAM, LRESULT, POINT, WPARAM,
+            CloseHandle, GetLastError, GlobalFree, SetLastError, ERROR_SUCCESS, HGLOBAL, HINSTANCE,
+            HWND, LPARAM, LRESULT, POINT, WPARAM,
         },
         System::{
             DataExchange::{
                 CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
-                GetClipboardData, GetClipboardOwner, GetClipboardSequenceNumber,
-                GetOpenClipboardWindow, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+                GetClipboardData, GetClipboardOwner, GetOpenClipboardWindow, OpenClipboard,
+                RegisterClipboardFormatW, SetClipboardData,
+            },
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
             },
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
@@ -548,8 +552,7 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
             ));
         }
 
-        let Some((original, mut temporary_sequence)) = prepare_temporary_clipboard(target, text)?
-        else {
+        let Some(original) = prepare_temporary_clipboard(target, text)? else {
             if GetForegroundWindow().0 != target.0 {
                 return Err(FlowError::Windows(
                     "The dictation target lost focus before Flow could type.".into(),
@@ -569,15 +572,14 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
                 ));
             }
             send_armed_paste_shortcut()?;
-            temporary_sequence =
-                wait_for_temporary_clipboard_request(temporary_sequence, Duration::from_secs(5))?;
+            wait_for_temporary_clipboard_request(Duration::from_secs(5))?;
             // WM_RENDERFORMAT confirms that the target requested the text. Give
             // GetClipboardData a short grace period to copy the rendered handle.
             thread::sleep(Duration::from_millis(50));
             Ok(())
         })();
 
-        let restore_result = restore_clipboard(&original, Some(temporary_sequence));
+        let restore_result = restore_clipboard(&original);
         if let Ok(mut state) = CLIPBOARD_RENDER_STATE.lock() {
             *state = None;
         }
@@ -596,9 +598,9 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
 struct ClipboardRenderState {
     wide: Vec<u16>,
     target_hwnd: isize,
-    target_process_id: u32,
+    target_process_ids: Vec<u32>,
     paste_armed: bool,
-    rendered: Option<std::result::Result<(u32, bool), String>>,
+    rendered: Option<std::result::Result<bool, String>>,
 }
 
 struct ClipboardItem {
@@ -609,7 +611,7 @@ struct ClipboardItem {
 unsafe fn prepare_temporary_clipboard(
     target: HWND,
     text: &str,
-) -> Result<Option<(Vec<ClipboardItem>, u32)>> {
+) -> Result<Option<Vec<ClipboardItem>>> {
     let owner = clipboard_owner()?;
     ensure_clipboard_render_handler(owner)?;
     let mut target_process_id = 0;
@@ -619,6 +621,7 @@ unsafe fn prepare_temporary_clipboard(
             "Could not identify the dictation target process.".into(),
         ));
     }
+    let target_process_ids = target_process_family(target_process_id);
     if !render_delayed_clipboard_with_timeout(owner) {
         return Ok(None);
     }
@@ -640,7 +643,7 @@ unsafe fn prepare_temporary_clipboard(
             *state = Some(ClipboardRenderState {
                 wide,
                 target_hwnd: target.0 as isize,
-                target_process_id,
+                target_process_ids,
                 paste_armed: false,
                 rendered: None,
             });
@@ -660,20 +663,19 @@ unsafe fn prepare_temporary_clipboard(
         exclude_from_clipboard_services();
         Ok(())
     })();
-    let temporary_sequence = GetClipboardSequenceNumber();
     let _ = CloseClipboard();
     if let Err(replace_error) = replace_result {
         if let Ok(mut state) = CLIPBOARD_RENDER_STATE.lock() {
             *state = None;
         }
-        return match restore_clipboard(&original, Some(temporary_sequence)) {
+        return match restore_clipboard(&original) {
             Ok(()) => Err(replace_error),
             Err(restore_error) => Err(FlowError::Windows(format!(
                 "{replace_error} The previous clipboard also could not be restored: {restore_error}"
             ))),
         };
     }
-    Ok(Some((original, temporary_sequence)))
+    Ok(Some(original))
 }
 
 unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> bool {
@@ -699,6 +701,42 @@ unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> bool {
         None,
     )
     .0 != 0
+}
+
+unsafe fn target_process_family(target_process_id: u32) -> Vec<u32> {
+    let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+        return vec![target_process_id];
+    };
+    let mut processes = Vec::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    if Process32FirstW(snapshot, &mut entry).is_ok() {
+        loop {
+            processes.push((entry.th32ProcessID, entry.th32ParentProcessID));
+            if Process32NextW(snapshot, &mut entry).is_err() {
+                break;
+            }
+        }
+    }
+    let _ = CloseHandle(snapshot);
+    descendant_process_ids(target_process_id, &processes)
+}
+
+fn descendant_process_ids(target_process_id: u32, processes: &[(u32, u32)]) -> Vec<u32> {
+    let mut family = vec![target_process_id];
+    loop {
+        let previous_len = family.len();
+        for &(process_id, parent_process_id) in processes {
+            if family.contains(&parent_process_id) && !family.contains(&process_id) {
+                family.push(process_id);
+            }
+        }
+        if family.len() == previous_len {
+            return family;
+        }
+    }
 }
 
 unsafe fn set_delayed_clipboard_text() -> Result<()> {
@@ -789,15 +827,16 @@ fn is_hglobal_clipboard_format(format: u32) -> bool {
     !matches!(format, 2 | 3 | 9 | 14 | 128 | 130 | 131 | 142 | 512..=1023)
 }
 
-unsafe fn restore_clipboard(items: &[ClipboardItem], expected_sequence: Option<u32>) -> Result<()> {
+unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {
+    let flow_owner = clipboard_owner()?;
     open_clipboard_with_retry(
-        clipboard_owner()?,
+        flow_owner,
         "Could not restore the clipboard; temporary dictation text may remain",
     )?;
     let result = (|| {
-        if expected_sequence.is_some_and(|sequence| GetClipboardSequenceNumber() != sequence) {
+        if GetClipboardOwner().map_or(true, |owner| owner.0 != flow_owner.0) {
             // Another application or the user replaced the temporary clipboard
-            // while Flow was waiting to acquire it. Preserve that newer value.
+            // while Flow was waiting. Preserve that newer owner's value.
             return Ok(());
         }
         let mut allocations = Vec::with_capacity(items.len());
@@ -901,7 +940,7 @@ unsafe extern "system" fn clipboard_window_proc(
                         let requested_by_target = state.paste_armed
                             && GetWindowThreadProcessId(requester, Some(&mut requester_process_id))
                                 != 0
-                            && requester_process_id == state.target_process_id;
+                            && state.target_process_ids.contains(&requester_process_id);
                         (requested_by_target, requested_by_target)
                     }
                     Err(_) => (
@@ -916,7 +955,7 @@ unsafe extern "system" fn clipboard_window_proc(
                 }
                 state.rendered = Some(
                     write_clipboard_wide(&state.wide)
-                        .map(|_| (GetClipboardSequenceNumber(), target_identified))
+                        .map(|_| target_identified)
                         .map_err(|error| error.to_string()),
                 );
                 CLIPBOARD_RENDERED.notify_all();
@@ -938,22 +977,22 @@ unsafe fn send_armed_paste_shortcut() -> Result<()> {
     send_paste_shortcut()
 }
 
-fn wait_for_temporary_clipboard_request(mut sequence: u32, timeout: Duration) -> Result<u32> {
+fn wait_for_temporary_clipboard_request(timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
-    let mut ownerless_render = None;
+    let expected_owner = clipboard_owner()?;
+    let mut ownerless_render = false;
     let mut guard = CLIPBOARD_RENDER_STATE
         .lock()
         .map_err(|_| FlowError::Windows("The clipboard renderer is unavailable.".into()))?;
     loop {
         if let Some(result) = guard.as_ref().and_then(|state| state.rendered.as_ref()) {
             match result {
-                Ok((rendered_sequence, true)) => return Ok(*rendered_sequence),
-                Ok((rendered_sequence, false)) => {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
                     // OpenClipboard(NULL) provides no requester identity. Keep the
                     // text available for the full timeout so a clipboard monitor
                     // cannot make Flow restore it before the target consumes it.
-                    sequence = *rendered_sequence;
-                    ownerless_render = Some(*rendered_sequence);
+                    ownerless_render = true;
                 }
                 Err(error) => {
                     return Err(FlowError::Windows(format!(
@@ -962,15 +1001,15 @@ fn wait_for_temporary_clipboard_request(mut sequence: u32, timeout: Duration) ->
                 }
             }
         }
-        if unsafe { GetClipboardSequenceNumber() } != sequence {
+        if unsafe { GetClipboardOwner() }.map_or(true, |owner| owner.0 != expected_owner.0) {
             return Err(FlowError::Windows(
                 "The clipboard changed before the destination requested the dictation.".into(),
             ));
         }
         let now = Instant::now();
         if now >= deadline {
-            if let Some(rendered_sequence) = ownerless_render {
-                return Ok(rendered_sequence);
+            if ownerless_render {
+                return Ok(());
             }
             return Err(FlowError::Windows(
                 "The destination did not request the dictation from the clipboard.".into(),
@@ -1164,7 +1203,7 @@ fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_clipboard_text;
+    use super::{descendant_process_ids, encode_clipboard_text};
 
     #[test]
     fn clipboard_text_uses_cr_lf_line_endings() {
@@ -1175,5 +1214,12 @@ mod tests {
             String::from_utf16(&wide[..wide.len() - 1]).unwrap(),
             "one\r\ntwo\r\nthree\r\nfour"
         );
+    }
+
+    #[test]
+    fn clipboard_requests_allow_only_the_target_process_family() {
+        let processes = [(10, 1), (11, 10), (12, 11), (20, 1), (21, 20)];
+
+        assert_eq!(descendant_process_ids(10, &processes), vec![10, 11, 12]);
     }
 }
