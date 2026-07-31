@@ -623,10 +623,17 @@ unsafe fn prepare_temporary_clipboard(
         ));
     }
     let target_process_ids = target_process_family(target_process_id);
-    if !render_delayed_clipboard_with_timeout(owner) {
+    let Some(rendered_owner) = render_delayed_clipboard_with_timeout(owner) else {
+        return Ok(None);
+    };
+    open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
+    let captured_owner = GetClipboardOwner().map_or(0, |owner| owner.0 as isize);
+    if captured_owner != rendered_owner {
+        // Ownership changed after the bounded render request. Do not risk a
+        // synchronous read from an owner that was never checked.
+        let _ = CloseClipboard();
         return Ok(None);
     }
-    open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let original = match capture_open_clipboard() {
         Ok(Some(original)) => Arc::new(original),
         Ok(None) => {
@@ -680,20 +687,20 @@ unsafe fn prepare_temporary_clipboard(
     Ok(Some(original))
 }
 
-unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> bool {
+unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> Option<isize> {
     const RENDER_TIMEOUT_MS: u32 = 500;
 
     let Ok(source_owner) = GetClipboardOwner() else {
-        return true;
+        return Some(0);
     };
     if source_owner.0 == flow_owner.0 {
-        return true;
+        return Some(source_owner.0 as isize);
     }
 
     // GetClipboardData may otherwise synchronously wait forever for a hung
     // owner to render delayed formats. Ask it to materialize those formats
     // through a bounded message before Flow opens and reads the clipboard.
-    SendMessageTimeoutW(
+    let rendered = SendMessageTimeoutW(
         source_owner,
         WM_RENDERALLFORMATS,
         WPARAM(0),
@@ -702,7 +709,8 @@ unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> bool {
         RENDER_TIMEOUT_MS,
         None,
     )
-    .0 != 0
+    .0 != 0;
+    rendered.then_some(source_owner.0 as isize)
 }
 
 unsafe fn target_process_family(target_process_id: u32) -> Vec<u32> {
