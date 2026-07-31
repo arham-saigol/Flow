@@ -434,14 +434,21 @@ fn clipboard_owner() -> Result<HWND> {
 
 unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<()> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    open_clipboard_with_retry(clipboard_owner()?, "Could not open the clipboard")?;
+    let allocation = allocate_clipboard_wide(&wide)?;
+    if let Err(error) =
+        open_clipboard_with_retry(clipboard_owner()?, "Could not open the clipboard")
+    {
+        let _ = GlobalFree(allocation);
+        return Err(error);
+    }
     if let Err(error) = EmptyClipboard() {
+        let _ = GlobalFree(allocation);
         let _ = CloseClipboard();
         return Err(FlowError::Windows(format!(
             "Could not clear the clipboard: {error}"
         )));
     }
-    if let Err(error) = write_clipboard_wide(&wide) {
+    if let Err(error) = set_clipboard_wide(allocation) {
         let _ = CloseClipboard();
         return Err(error);
     }
@@ -453,6 +460,11 @@ unsafe fn write_clipboard_text(text: &str, include_in_history: bool) -> Result<(
 }
 
 unsafe fn write_clipboard_wide(wide: &[u16]) -> Result<()> {
+    let allocation = allocate_clipboard_wide(wide)?;
+    set_clipboard_wide(allocation)
+}
+
+unsafe fn allocate_clipboard_wide(wide: &[u16]) -> Result<HGLOBAL> {
     let allocation = GlobalAlloc(GMEM_MOVEABLE, std::mem::size_of_val(wide)).map_err(|error| {
         FlowError::Windows(format!("Could not allocate clipboard memory: {error}"))
     })?;
@@ -465,6 +477,10 @@ unsafe fn write_clipboard_wide(wide: &[u16]) -> Result<()> {
     }
     std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
     let _ = GlobalUnlock(allocation);
+    Ok(allocation)
+}
+
+unsafe fn set_clipboard_wide(allocation: HGLOBAL) -> Result<()> {
     if let Err(error) = SetClipboardData(
         CF_UNICODETEXT,
         windows::Win32::Foundation::HANDLE(allocation.0),
