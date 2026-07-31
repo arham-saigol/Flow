@@ -175,6 +175,7 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
         state.busy.store(false, Ordering::Release);
     }
     let message = friendly_error(error);
+    eprintln!("Flow error: {message}");
     if platform::prepare_overlay(app, platform::capture_target()).is_err() {
         crate::show_main(app);
     }
@@ -344,6 +345,7 @@ fn friendly_error(error: FlowError) -> String {
         FlowError::Network(_) => {
             "Flow couldn’t reach Groq. Check your connection and try again.".into()
         }
+        FlowError::Windows(message) => message,
         other => other.to_string(),
     }
 }
