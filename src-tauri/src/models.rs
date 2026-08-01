@@ -11,6 +11,15 @@ pub struct HistoryEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct PendingDictation {
+    pub id: i64,
+    pub text: String,
+    pub stage: String,
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DictionaryEntry {
     pub id: i64,
     pub value: String,
@@ -33,6 +42,7 @@ pub struct DashboardData {
     pub time_dictated_ms: i64,
     pub estimated_saved_ms: i64,
     pub history: Vec<HistoryEntry>,
+    pub pending: Vec<PendingDictation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

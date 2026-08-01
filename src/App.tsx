@@ -101,16 +101,21 @@ export default function App() {
   const [dashboardVersion, setDashboardVersion] = useState(0);
   const [keybind, setKeybind] = useState("Right Alt");
   const toastTimer = useRef<number | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
 
   const notify = useCallback((data: ToastData) => {
     if (toastTimer.current !== null) {
       window.clearTimeout(toastTimer.current);
     }
     setToast(data);
-    toastTimer.current = window.setTimeout(() => {
-      setToast(null);
+    if (data.kind === "success") {
+      toastTimer.current = window.setTimeout(() => {
+        setToast(null);
+        toastTimer.current = null;
+      }, 3500);
+    } else {
       toastTimer.current = null;
-    }, 3500);
+    }
   }, []);
 
   useEffect(() => {
@@ -126,9 +131,9 @@ export default function App() {
       .settings()
       .then((settings) => setKeybind(settings.keybind))
       .catch((error) => notify({ kind: "error", message: String(error) }));
-    const unlisten = listen<{ message: string }>("dictation-complete", () => {
+    const unlisten = listen<{ message: string }>("dictation-complete", (event) => {
       setDashboardVersion((version) => version + 1);
-      notify({ kind: "success", message: "Dictation pasted" });
+      notify({ kind: "success", message: event.payload.message });
     });
     const unlistenError = listen<{ message: string }>("flow-error", (event) => {
       notify({ kind: "error", message: event.payload.message });
@@ -167,7 +172,7 @@ export default function App() {
             ))}
           </nav>
           <div className="sidebar__bottom">
-            <button onClick={() => setSettingsOpen(true)}>
+            <button ref={settingsButtonRef} onClick={() => setSettingsOpen(true)}>
               <SlidersHorizontal size={18} strokeWidth={1.75} />
               <span>Settings</span>
             </button>
@@ -190,10 +195,11 @@ export default function App() {
       {settingsOpen && (
         <SettingsModal
           onClose={() => setSettingsOpen(false)}
+          returnFocusRef={settingsButtonRef}
           notify={notify}
           onSaved={(savedKeybind) => {
             setKeybind(savedKeybind);
-            void api.dashboard().then(() => setDashboardVersion((v) => v + 1));
+            setDashboardVersion((v) => v + 1);
           }}
         />
       )}

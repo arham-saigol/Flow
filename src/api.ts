@@ -43,4 +43,8 @@ export const api = {
   startRecording: () => invokeCommand<void>("start_recording"),
   stopRecording: () => invokeCommand<void>("stop_recording"),
   cancelRecording: () => invokeCommand<void>("cancel_recording"),
+  retryPendingDictation: (id: number) =>
+    invokeCommand<void>("retry_pending_dictation", { id }),
+  deletePendingDictation: (id: number) =>
+    invokeCommand<void>("delete_pending_dictation", { id }),
 };

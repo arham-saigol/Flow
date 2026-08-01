@@ -279,7 +279,7 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
             if let Some(app) = APP.get() {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    crate::workflow::cancel(&app);
+                    let _ = crate::workflow::cancel(&app);
                 });
             }
         }
@@ -556,6 +556,11 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
             if GetForegroundWindow().0 != target.0 {
                 return Err(FlowError::Windows(
                     "The dictation target lost focus before Flow could type.".into(),
+                ));
+            }
+            if text.contains(['\r', '\n']) {
+                return Err(FlowError::Windows(
+                    "Flow could not safely preserve the clipboard, so it did not type multiline text. Open Flow to retry or copy the recovered dictation.".into(),
                 ));
             }
             return send_unicode(text);
@@ -1189,7 +1194,7 @@ fn extended_key_flag(extended: bool) -> KEYBD_EVENT_FLAGS {
 fn report_input_error(app: AppHandle, error: FlowError) {
     tauri::async_runtime::spawn(async move {
         if RECORDING.load(Ordering::Acquire) {
-            crate::workflow::cancel(&app);
+            let _ = crate::workflow::cancel(&app);
         }
         crate::workflow::report_error(&app, error);
     });

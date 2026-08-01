@@ -13,7 +13,10 @@ export function Toast({
   onClose: () => void;
 }) {
   return (
-    <div className={`toast toast--${data.kind}`} role="status">
+    <div
+      className={`toast toast--${data.kind}`}
+      role={data.kind === "error" ? "alert" : "status"}
+    >
       {data.kind === "success" ? <Check size={16} /> : <CircleAlert size={16} />}
       <span>{data.message}</span>
       <button aria-label="Dismiss" onClick={onClose}>

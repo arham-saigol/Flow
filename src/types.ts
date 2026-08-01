@@ -29,6 +29,15 @@ export interface DashboardData {
   time_dictated_ms: number;
   estimated_saved_ms: number;
   history: HistoryEntry[];
+  pending: PendingDictation[];
+}
+
+export interface PendingDictation {
+  id: number;
+  text: string;
+  stage: "transcription" | "cleanup" | "ready";
+  error: string | null;
+  created_at: number;
 }
 
 export interface SettingsData {

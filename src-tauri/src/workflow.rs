@@ -1,5 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    LazyLock, Mutex,
+};
 
+use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 use unicode_categories::UnicodeCategories;
 
@@ -11,6 +15,16 @@ use crate::{
 };
 
 static ERROR_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ERROR_DISMISS_TASK: LazyLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
+    LazyLock::new(|| Mutex::new(None));
+static CORRECTION_MATCHER: LazyLock<Mutex<CorrectionMatcherCache>> =
+    LazyLock::new(|| Mutex::new(CorrectionMatcherCache::default()));
+
+#[derive(Default)]
+struct CorrectionMatcherCache {
+    corrections: Vec<(String, String)>,
+    matcher: Option<AhoCorasick>,
+}
 
 pub async fn toggle(app: &AppHandle) {
     toggle_with_target(app, platform::remembered_target()).await;
@@ -23,16 +37,18 @@ pub async fn toggle_from_tray(app: &AppHandle) {
 async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     if state.recorder.is_recording() {
-        stop_and_process_with_target(app, target).await;
+        if let Err(error) = stop_and_process_with_target(app, target).await {
+            let _ = reported_error(app, error);
+        }
     } else if !state.busy.load(Ordering::Acquire) {
         if let Err(error) = start_with_target(app, target) {
-            report_error(app, error);
+            let _ = reported_error(app, error);
         }
     }
 }
 
 pub fn start(app: &AppHandle) -> Result<()> {
-    start_with_target(app, None)
+    start_with_target(app, None).map_err(|error| reported_error(app, error))
 }
 
 fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
@@ -41,6 +57,7 @@ fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) ->
         return Err(FlowError::AlreadyRecording);
     }
     ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
+    cancel_error_dismiss();
     let result = (|| {
         let has_key = credentials::has_api_key();
         if !has_key {
@@ -62,14 +79,21 @@ fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) ->
     result
 }
 
-pub async fn stop_and_process(app: &AppHandle) {
-    stop_and_process_with_target(app, Some(platform::capture_target())).await;
+pub async fn stop_and_process(app: &AppHandle) -> Result<()> {
+    stop_and_process_with_target(app, Some(platform::capture_target()))
+        .await
+        .map_err(|error| reported_error(app, error))
 }
 
-async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
+async fn stop_and_process_with_target(
+    app: &AppHandle,
+    target: Option<platform::TargetWindow>,
+) -> Result<()> {
     let state = app.state::<AppState>();
     if state.processing.swap(true, Ordering::AcqRel) {
-        return;
+        return Err(FlowError::Message(
+            "Flow is already processing a dictation.".into(),
+        ));
     }
     platform::set_recording(false);
     let recording = match state.recorder.stop() {
@@ -77,98 +101,174 @@ async fn stop_and_process_with_target(app: &AppHandle, target: Option<platform::
         Err(error) => {
             state.processing.store(false, Ordering::Release);
             state.busy.store(false, Ordering::Release);
-            report_error(app, error);
-            return;
+            return Err(error);
         }
     };
     // Capture the destination when dictation is stopped. Processing may take
     // several seconds, during which the foreground window can change again.
     let paste_target = target.unwrap_or(recording.target);
+    let pending_id = match state
+        .database
+        .insert_pending_recording(&recording.wav, recording.duration_ms)
+    {
+        Ok(id) => id,
+        Err(error) => {
+            state.processing.store(false, Ordering::Release);
+            state.busy.store(false, Ordering::Release);
+            return Err(error);
+        }
+    };
+    run_pending(app, pending_id, Some(paste_target)).await
+}
+
+pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
+    retry_pending_inner(app, id)
+        .await
+        .map_err(|error| reported_error(app, error))
+}
+
+async fn retry_pending_inner(app: &AppHandle, id: i64) -> Result<()> {
+    let state = app.state::<AppState>();
+    if state.busy.swap(true, Ordering::AcqRel) {
+        return Err(FlowError::Message(
+            "Flow is busy with another dictation.".into(),
+        ));
+    }
+    if state.processing.swap(true, Ordering::AcqRel) {
+        state.busy.store(false, Ordering::Release);
+        return Err(FlowError::Message(
+            "Flow is already processing a dictation.".into(),
+        ));
+    }
+    ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
+    cancel_error_dismiss();
+    let overlay_target = platform::capture_target();
+    if let Err(error) = platform::prepare_overlay(app, overlay_target) {
+        state.processing.store(false, Ordering::Release);
+        state.busy.store(false, Ordering::Release);
+        return Err(error);
+    }
+    run_pending(app, id, None).await
+}
+
+async fn run_pending(
+    app: &AppHandle,
+    pending_id: i64,
+    paste_target: Option<platform::TargetWindow>,
+) -> Result<()> {
+    let state = app.state::<AppState>();
     emit_overlay(app, "analysing", Some("Analyzing"));
-
     let result = async {
-        let api_key = credentials::read_api_key()?;
+        let pending = state.database.pending_dictation(pending_id)?;
         let settings = state.database.settings(true)?;
-        let dictionary = state.database.dictionary()?;
-        let (preferred_spellings, corrections) = dictionary_guidance(&dictionary);
-        let transcript = state
-            .groq
-            .transcribe(&api_key, recording.wav, &preferred_spellings)
-            .await?;
-
-        let normalized = normalize_with_corrections(&transcript, &corrections);
-        let snippet = state
-            .database
-            .snippets()?
-            .into_iter()
-            .find(|snippet| normalize_utterance(&snippet.trigger) == normalized);
-        let final_text = if let Some(snippet) = snippet {
-            snippet.content
+        let transcript = if let Some(transcript) = pending.raw_text.clone() {
+            transcript
         } else {
-            emit_overlay(app, "thinking", Some("Thinking"));
-            state
+            let api_key = credentials::read_api_key()?;
+            let dictionary = state.database.dictionary()?;
+            let (preferred_spellings, _) = dictionary_guidance(&dictionary);
+            let wav = pending.wav.ok_or_else(|| {
+                FlowError::Message("The recoverable recording is incomplete.".into())
+            })?;
+            let transcript = state
                 .groq
-                .clean(&api_key, &transcript, &corrections)
-                .await?
+                .transcribe(&api_key, wav, &preferred_spellings)
+                .await?;
+            state
+                .database
+                .save_pending_transcript(pending_id, &transcript)?;
+            transcript
         };
 
-        platform::paste_text(paste_target, &final_text)?;
-        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
-        let history_result = state
+        let final_text = if let Some(final_text) = pending.final_text {
+            final_text
+        } else {
+            let api_key = credentials::read_api_key()?;
+            let dictionary = state.database.dictionary()?;
+            let (_, corrections) = dictionary_guidance(&dictionary);
+            let normalized = normalize_with_corrections(&transcript, &corrections);
+            let snippet = state
+                .database
+                .snippets()?
+                .into_iter()
+                .find(|snippet| normalize_utterance(&snippet.trigger) == normalized);
+            let final_text = if let Some(snippet) = snippet {
+                snippet.content
+            } else {
+                emit_overlay(app, "thinking", Some("Thinking"));
+                state
+                    .groq
+                    .clean(&api_key, &transcript, &corrections)
+                    .await?
+            };
+            state.database.save_pending_final(pending_id, &final_text)?;
+            final_text
+        };
+
+        state
             .database
-            .insert_history(&final_text, &transcript, recording.duration_ms)
-            .and_then(|_| state.database.prune_history(&settings.history_retention));
-        Ok::<_, FlowError>(history_result.err())
+            .save_pending_to_history(pending.id, &settings.history_retention)?;
+        let completion_message = if let Some(paste_target) = paste_target {
+            platform::paste_text(paste_target, &final_text)?;
+            "Dictation pasted"
+        } else {
+            platform::copy_text(&final_text)?;
+            "Recovered dictation copied"
+        };
+        state.database.delete_pending(pending.id)?;
+        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
+        Ok::<_, FlowError>(completion_message)
     }
     .await;
 
     match result {
-        Ok(history_error) => {
+        Ok(completion_message) => {
             dismiss_overlay(app, None).await;
             let _ = app.emit(
                 "dictation-complete",
                 MessagePayload {
-                    message: "Dictation pasted".into(),
+                    message: completion_message.into(),
                 },
             );
-            if let Some(error) = history_error {
-                let _ = app.emit(
-                    "flow-warning",
-                    MessagePayload {
-                        message: format!(
-                            "Dictation pasted, but Flow could not update history: {error}"
-                        ),
-                    },
-                );
-            }
             state.processing.store(false, Ordering::Release);
             state.busy.store(false, Ordering::Release);
+            Ok(())
         }
         Err(error) => {
+            let message = friendly_error_ref(&error);
+            let _ = state.database.save_pending_error(pending_id, &message);
             state.processing.store(false, Ordering::Release);
-            report_error(app, error);
+            state.busy.store(false, Ordering::Release);
+            Err(error)
         }
     }
 }
 
-pub fn cancel(app: &AppHandle) {
+pub fn cancel(app: &AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    if state.recorder.cancel().is_ok() {
-        platform::set_recording(false);
-        state.busy.store(false, Ordering::Release);
-        let _ = app.emit_to("overlay", "overlay-dismiss", ());
-        let generation = ERROR_GENERATION.load(Ordering::Acquire);
-        let app_clone = app.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio_sleep(std::time::Duration::from_millis(130)).await;
-            if ERROR_GENERATION.load(Ordering::Acquire) == generation {
-                hide_overlay(&app_clone);
-            }
-        });
-    }
+    state
+        .recorder
+        .cancel()
+        .map_err(|error| reported_error(app, error))?;
+    platform::set_recording(false);
+    state.busy.store(false, Ordering::Release);
+    let _ = app.emit_to("overlay", "overlay-dismiss", ());
+    let generation = ERROR_GENERATION.load(Ordering::Acquire);
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(130)).await;
+        if ERROR_GENERATION.load(Ordering::Acquire) == generation {
+            hide_overlay(&app_clone);
+        }
+    });
+    Ok(())
 }
 
 pub fn report_error(app: &AppHandle, error: FlowError) {
+    let _ = reported_error(app, error);
+}
+
+fn reported_error(app: &AppHandle, error: FlowError) -> FlowError {
     platform::set_recording(false);
     let state = app.state::<AppState>();
     if !state.processing.load(Ordering::Acquire) {
@@ -176,9 +276,7 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
     }
     let message = friendly_error(error);
     eprintln!("Flow error: {message}");
-    if platform::prepare_overlay(app, platform::capture_target()).is_err() {
-        crate::show_main(app);
-    }
+    let _ = platform::prepare_overlay(app, platform::capture_target());
     emit_overlay(app, "error", Some(&message));
     let _ = app.emit(
         "flow-error",
@@ -188,12 +286,27 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
     );
     let generation = ERROR_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
     let app_clone = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio_sleep(std::time::Duration::from_secs(4)).await;
+    let task = tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
         if ERROR_GENERATION.load(Ordering::Acquire) == generation {
             dismiss_overlay(&app_clone, Some(generation)).await;
         }
     });
+    if let Ok(mut previous) = ERROR_DISMISS_TASK.lock() {
+        if let Some(previous) = previous.replace(task) {
+            previous.abort();
+        }
+    }
+    crate::show_main(app);
+    FlowError::Message(message)
+}
+
+fn cancel_error_dismiss() {
+    if let Ok(mut task) = ERROR_DISMISS_TASK.lock() {
+        if let Some(task) = task.take() {
+            task.abort();
+        }
+    }
 }
 
 fn emit_overlay(app: &AppHandle, phase: &str, message: Option<&str>) {
@@ -215,7 +328,7 @@ fn hide_overlay(app: &AppHandle) {
 
 async fn dismiss_overlay(app: &AppHandle, expected_generation: Option<u64>) {
     let _ = app.emit_to("overlay", "overlay-dismiss", ());
-    tokio_sleep(std::time::Duration::from_millis(130)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(130)).await;
     if expected_generation
         .map(|generation| ERROR_GENERATION.load(Ordering::Acquire) == generation)
         .unwrap_or(true)
@@ -289,7 +402,10 @@ pub(crate) fn normalize_correction_source(value: &str) -> String {
 
 fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> String {
     let normalized = normalize_correction_source(value);
-    let mut corrections = corrections
+    let Ok(mut cache) = CORRECTION_MATCHER.lock() else {
+        return normalize_utterance(&normalized);
+    };
+    let next = corrections
         .iter()
         .map(|(incorrect, correct)| {
             (
@@ -299,36 +415,48 @@ fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> 
         })
         .filter(|(incorrect, correct)| !incorrect.is_empty() && !correct.is_empty())
         .collect::<Vec<_>>();
-    corrections.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
-
+    if cache.corrections != next {
+        cache.matcher = if next.is_empty() {
+            None
+        } else {
+            AhoCorasickBuilder::new()
+                .build(next.iter().map(|(incorrect, _)| incorrect))
+                .ok()
+        };
+        cache.corrections = next;
+    }
+    let Some(matcher) = cache.matcher.as_ref() else {
+        return normalize_utterance(&normalized);
+    };
     let mut corrected = String::with_capacity(normalized.len());
     let mut index = 0;
-    while index < normalized.len() {
-        let matching = corrections.iter().find(|(incorrect, _)| {
-            let end = index + incorrect.len();
-            end <= normalized.len()
-                && normalized[index..].starts_with(incorrect)
-                && normalized[..index]
-                    .chars()
-                    .next_back()
-                    .is_none_or(|character| !character.is_alphanumeric())
-                && normalized[end..]
+    let mut matches = matcher
+        .find_overlapping_iter(&normalized)
+        .filter(|matching| {
+            normalized[..matching.start()]
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_alphanumeric())
+                && normalized[matching.end()..]
                     .chars()
                     .next()
                     .is_none_or(|character| !character.is_alphanumeric())
-        });
-        if let Some((incorrect, correct)) = matching {
-            corrected.push_str(correct);
-            index += incorrect.len();
-        } else {
-            let character = normalized[index..]
-                .chars()
-                .next()
-                .expect("index always points to a character boundary");
-            corrected.push(character);
-            index += character.len_utf8();
+        })
+        .collect::<Vec<_>>();
+    matches.sort_unstable_by(|left, right| {
+        left.start()
+            .cmp(&right.start())
+            .then_with(|| right.len().cmp(&left.len()))
+    });
+    for matching in matches {
+        if matching.start() < index {
+            continue;
         }
+        corrected.push_str(&normalized[index..matching.start()]);
+        corrected.push_str(&cache.corrections[matching.pattern()].1);
+        index = matching.end();
     }
+    corrected.push_str(&normalized[index..]);
     normalize_utterance(&corrected)
 }
 
@@ -350,14 +478,14 @@ fn friendly_error(error: FlowError) -> String {
     }
 }
 
-async fn tokio_sleep(duration: std::time::Duration) {
-    // Tauri's async runtime provides a Tokio context through the default runtime.
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        std::thread::sleep(duration);
-        let _ = sender.send(());
-    });
-    let _ = tauri::async_runtime::spawn_blocking(move || receiver.recv()).await;
+fn friendly_error_ref(error: &FlowError) -> String {
+    match error {
+        FlowError::Network(_) => {
+            "Flow couldn’t reach Groq. Check your connection and try again.".into()
+        }
+        FlowError::Windows(message) => message.clone(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +554,15 @@ mod tests {
         assert_eq!(
             normalize_with_corrections("c project", &corrections),
             "c project"
+        );
+    }
+
+    #[test]
+    fn correction_matching_keeps_valid_shorter_overlaps() {
+        let corrections = vec![("c".into(), "see".into()), ("c sharp".into(), "C#".into())];
+        assert_eq!(
+            normalize_with_corrections("c sharper", &corrections),
+            "see sharper"
         );
     }
 }

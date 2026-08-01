@@ -8,8 +8,22 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::{
     error::{FlowError, Result},
-    models::{DashboardData, DictionaryEntry, HistoryEntry, SettingsData, Snippet},
+    models::{
+        DashboardData, DictionaryEntry, HistoryEntry, PendingDictation, SettingsData, Snippet,
+    },
 };
+
+const MAX_DICTIONARY_ENTRIES: i64 = 1_000;
+const MAX_DICTIONARY_VALUE_CHARS: usize = 100;
+const MAX_DICTIONARY_CORRECTION_CHARS: usize = 200;
+
+pub struct PendingDictationRecord {
+    pub id: i64,
+    pub wav: Option<Vec<u8>>,
+    pub raw_text: Option<String>,
+    pub final_text: Option<String>,
+    pub duration_ms: i64,
+}
 
 pub struct Database {
     connection: Mutex<Connection>,
@@ -60,6 +74,28 @@ impl Database {
             INSERT OR IGNORE INTO aggregate_stats(id, total_words, total_duration_ms)
             SELECT 1, COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
             FROM history;
+            CREATE TABLE IF NOT EXISTS weekly_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                word_count INTEGER NOT NULL,
+                duration_ms INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS weekly_stats_created_at
+                ON weekly_stats(created_at);
+            INSERT INTO weekly_stats(word_count, duration_ms, created_at)
+            SELECT word_count, duration_ms, created_at FROM history
+            WHERE NOT EXISTS (SELECT 1 FROM weekly_stats);
+            CREATE TABLE IF NOT EXISTS pending_dictations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wav BLOB,
+                raw_text TEXT,
+                final_text TEXT,
+                duration_ms INTEGER NOT NULL,
+                history_saved INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS dictionary (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 value TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -189,6 +225,7 @@ impl Database {
         self.prune_history(&retention)?;
         let week_ago = Self::now() - 7 * 86_400;
         let conn = self.conn()?;
+        conn.execute("DELETE FROM weekly_stats WHERE created_at < ?1", [week_ago])?;
         let (total_words, total_duration): (i64, i64) = conn.query_row(
             "SELECT total_words, total_duration_ms
              FROM aggregate_stats WHERE id = 1",
@@ -197,8 +234,8 @@ impl Database {
         )?;
         let (weekly_words, weekly_duration): (i64, i64) = conn.query_row(
             "SELECT COALESCE(SUM(word_count), 0), COALESCE(SUM(duration_ms), 0)
-             FROM history WHERE created_at >= ?1",
-            [week_ago],
+             FROM weekly_stats",
+            [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let mut statement = conn.prepare(
@@ -214,6 +251,25 @@ impl Database {
                     word_count: row.get(3)?,
                     duration_ms: row.get(4)?,
                     created_at: row.get(5)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut pending_statement = conn.prepare(
+            "SELECT id, COALESCE(final_text, raw_text, ''),
+                    CASE WHEN final_text IS NOT NULL THEN 'ready'
+                         WHEN raw_text IS NOT NULL THEN 'cleanup'
+                         ELSE 'transcription' END,
+                    last_error, created_at
+             FROM pending_dictations ORDER BY created_at DESC",
+        )?;
+        let pending = pending_statement
+            .query_map([], |row| {
+                Ok(PendingDictation {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    stage: row.get(2)?,
+                    error: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -235,6 +291,7 @@ impl Database {
             time_dictated_ms: weekly_duration,
             estimated_saved_ms: typing_ms.saturating_sub(weekly_duration),
             history,
+            pending,
         })
     }
 
@@ -255,7 +312,119 @@ impl Database {
                  total_duration_ms = total_duration_ms + excluded.total_duration_ms",
             params![word_count, duration_ms],
         )?;
+        transaction.execute(
+            "INSERT INTO weekly_stats(word_count, duration_ms, created_at) VALUES(?1, ?2, ?3)",
+            params![word_count, duration_ms, Self::now()],
+        )?;
         transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn insert_pending_recording(&self, wav: &[u8], duration_ms: i64) -> Result<i64> {
+        let now = Self::now();
+        let conn = self.conn()?;
+        conn.execute(
+            "INSERT INTO pending_dictations(wav, duration_ms, created_at, updated_at)
+             VALUES(?1, ?2, ?3, ?3)",
+            params![wav, duration_ms, now],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn pending_dictation(&self, id: i64) -> Result<PendingDictationRecord> {
+        self.conn()?
+            .query_row(
+                "SELECT id, wav, raw_text, final_text, duration_ms
+                 FROM pending_dictations WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok(PendingDictationRecord {
+                        id: row.get(0)?,
+                        wav: row.get(1)?,
+                        raw_text: row.get(2)?,
+                        final_text: row.get(3)?,
+                        duration_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                FlowError::Message("That recoverable dictation no longer exists.".into())
+            })
+    }
+
+    pub fn save_pending_transcript(&self, id: i64, transcript: &str) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE pending_dictations
+             SET wav = NULL, raw_text = ?1, last_error = NULL, updated_at = ?2
+             WHERE id = ?3",
+            params![transcript, Self::now(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pending_final(&self, id: i64, text: &str) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE pending_dictations
+             SET final_text = ?1, last_error = NULL, updated_at = ?2 WHERE id = ?3",
+            params![text, Self::now(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pending_error(&self, id: i64, error: &str) -> Result<()> {
+        self.conn()?.execute(
+            "UPDATE pending_dictations SET last_error = ?1, updated_at = ?2 WHERE id = ?3",
+            params![error, Self::now(), id],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pending_to_history(&self, id: i64, retention: &str) -> Result<()> {
+        let mut conn = self.conn()?;
+        let transaction = conn.transaction()?;
+        let (text, raw_text, duration_ms, history_saved): (String, String, i64, bool) = transaction
+            .query_row(
+                "SELECT final_text, raw_text, duration_ms, history_saved
+             FROM pending_dictations WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        if history_saved {
+            return Ok(());
+        }
+        let word_count = text.split_whitespace().count() as i64;
+        let now = Self::now();
+        transaction.execute(
+            "INSERT INTO history(text, raw_text, word_count, duration_ms, created_at)
+             VALUES(?1, ?2, ?3, ?4, ?5)",
+            params![text, raw_text, word_count, duration_ms, now],
+        )?;
+        transaction.execute(
+            "INSERT INTO aggregate_stats(id, total_words, total_duration_ms)
+             VALUES(1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET total_words = total_words + excluded.total_words,
+                 total_duration_ms = total_duration_ms + excluded.total_duration_ms",
+            params![word_count, duration_ms],
+        )?;
+        transaction.execute(
+            "INSERT INTO weekly_stats(word_count, duration_ms, created_at) VALUES(?1, ?2, ?3)",
+            params![word_count, duration_ms, now],
+        )?;
+        transaction.execute(
+            "UPDATE pending_dictations SET history_saved = 1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        if let Some(seconds) = retention_seconds(retention) {
+            transaction.execute("DELETE FROM history WHERE created_at < ?1", [now - seconds])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_pending(&self, id: i64) -> Result<()> {
+        self.conn()?
+            .execute("DELETE FROM pending_dictations WHERE id = ?1", [id])?;
         Ok(())
     }
 
@@ -282,6 +451,12 @@ impl Database {
         let (value, correction) = validate_dictionary_entry(value, correction)?;
         let now = Self::now();
         let conn = self.conn()?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM dictionary", [], |row| row.get(0))?;
+        if count >= MAX_DICTIONARY_ENTRIES {
+            return Err(FlowError::Message(format!(
+                "The dictionary can contain up to {MAX_DICTIONARY_ENTRIES} entries."
+            )));
+        }
         if correction.is_some() && normalized_correction_source_exists(&conn, &value, None)? {
             return Err(FlowError::Message(
                 "That dictionary entry already exists.".into(),
@@ -401,12 +576,22 @@ fn validate_dictionary_entry(
     if value.is_empty() {
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
+    if value.chars().count() > MAX_DICTIONARY_VALUE_CHARS {
+        return Err(FlowError::Message(format!(
+            "Dictionary entries can contain up to {MAX_DICTIONARY_VALUE_CHARS} characters."
+        )));
+    }
     if correction.is_some() && crate::workflow::normalize_correction_source(value).is_empty() {
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
     let correction = correction.map(str::trim);
     if correction.is_some_and(str::is_empty) {
         return Err(FlowError::Message("Enter the correct spelling.".into()));
+    }
+    if correction.is_some_and(|value| value.chars().count() > MAX_DICTIONARY_CORRECTION_CHARS) {
+        return Err(FlowError::Message(format!(
+            "Dictionary corrections can contain up to {MAX_DICTIONARY_CORRECTION_CHARS} characters."
+        )));
     }
     if correction.is_some_and(|correction| correction == value) {
         return Err(FlowError::Message(
@@ -469,6 +654,8 @@ mod tests {
     };
 
     use rusqlite::Connection;
+
+    use crate::models::SettingsData;
 
     use super::Database;
 
@@ -574,6 +761,65 @@ mod tests {
             "That dictionary entry already exists."
         );
 
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn pending_dictation_keeps_recoverable_stages_and_commits_once() {
+        let path = database_path("pending-dictation");
+        let database = Database::open(&path).unwrap();
+        let id = database.insert_pending_recording(b"wav", 1_500).unwrap();
+        let recording = database.pending_dictation(id).unwrap();
+        assert_eq!(recording.wav.as_deref(), Some(b"wav".as_slice()));
+
+        database.save_pending_transcript(id, "raw words").unwrap();
+        let transcript = database.pending_dictation(id).unwrap();
+        assert!(transcript.wav.is_none());
+        assert_eq!(transcript.raw_text.as_deref(), Some("raw words"));
+
+        database.save_pending_final(id, "Final words").unwrap();
+        database.save_pending_to_history(id, "30 days").unwrap();
+        database.save_pending_to_history(id, "30 days").unwrap();
+        let dashboard = database.dashboard().unwrap();
+        assert_eq!(dashboard.history.len(), 1);
+        assert_eq!(dashboard.pending.len(), 1);
+        assert_eq!(dashboard.pending[0].text, "Final words");
+
+        database.delete_pending(id).unwrap();
+        assert!(database.dashboard().unwrap().pending.is_empty());
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn weekly_stats_outlive_short_content_retention() {
+        let path = database_path("weekly-retention");
+        let database = Database::open(&path).unwrap();
+        database
+            .insert_history("one two", "one two", 1_000)
+            .unwrap();
+        let two_days_ago = Database::now() - 2 * 86_400;
+        database
+            .conn()
+            .unwrap()
+            .execute("UPDATE history SET created_at = ?1", [two_days_ago])
+            .unwrap();
+        database
+            .conn()
+            .unwrap()
+            .execute("UPDATE weekly_stats SET created_at = ?1", [two_days_ago])
+            .unwrap();
+        let settings = SettingsData {
+            history_retention: "24 hours".into(),
+            ..SettingsData::default()
+        };
+        database.save_settings(&settings).unwrap();
+
+        let dashboard = database.dashboard().unwrap();
+        assert!(dashboard.history.is_empty());
+        assert_eq!(dashboard.time_dictated_ms, 1_000);
+        assert_eq!(dashboard.estimated_saved_ms, 2_000);
         drop(database);
         let _ = std::fs::remove_file(path);
     }

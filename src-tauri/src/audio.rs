@@ -1,8 +1,7 @@
 use std::{
-    io::Cursor,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        mpsc, Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
     },
     time::{Duration, Instant},
 };
@@ -11,6 +10,7 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, DeviceId, SampleFormat, Stream, StreamConfig,
 };
+use ringbuf::{traits::*, HeapCons, HeapProd, HeapRb};
 use tauri::{AppHandle, Emitter};
 
 use crate::{
@@ -26,11 +26,60 @@ pub struct CapturedAudio {
 }
 
 struct ActiveRecording {
-    _stream: Stream,
-    samples: Arc<Mutex<Vec<f32>>>,
-    sample_rate: u32,
+    stream: Option<Stream>,
+    capture_thread: Option<std::thread::JoinHandle<EncodedCapture>>,
+    stop_capture: Arc<AtomicBool>,
     started: Instant,
     target: TargetWindow,
+}
+
+struct EncodedCapture {
+    wav: Vec<u8>,
+    sample_count: usize,
+    audible: bool,
+}
+
+struct AudibilityDetector {
+    sum: f32,
+    samples: usize,
+    audible_windows: usize,
+    audible: bool,
+}
+
+impl AudibilityDetector {
+    fn new() -> Self {
+        Self {
+            sum: 0.0,
+            samples: 0,
+            audible_windows: 0,
+            audible: false,
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        self.sum += sample * sample;
+        self.samples += 1;
+        if self.samples == 320 {
+            if (self.sum / self.samples as f32).sqrt() >= 0.003 {
+                self.audible_windows += 1;
+                self.audible |= self.audible_windows >= 3;
+            } else {
+                self.audible_windows = 0;
+            }
+            self.sum = 0.0;
+            self.samples = 0;
+        }
+    }
+}
+
+impl Drop for ActiveRecording {
+    fn drop(&mut self) {
+        self.stream.take();
+        self.stop_capture.store(true, Ordering::Release);
+        if let Some(thread) = self.capture_thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 pub struct AudioRecorder {
@@ -176,158 +225,161 @@ fn begin_recording(
     })?;
     let sample_format = supported.sample_format();
     let config: StreamConfig = supported.into();
-    let samples = Arc::new(Mutex::new(Vec::with_capacity(
-        config.sample_rate as usize * 30,
-    )));
-    let emit_counter = Arc::new(AtomicUsize::new(0));
     let channels = config.channels as usize;
-    let threshold = (config.sample_rate / 30).max(1) as usize;
-    let stream = match sample_format {
+    let ring = HeapRb::<f32>::new(config.sample_rate as usize * 2);
+    let (producer, consumer) = ring.split();
+    let stop_capture = Arc::new(AtomicBool::new(false));
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let worker_app = app.clone();
+    let worker_error_sender = error_sender.clone();
+    let stream_result = match sample_format {
         SampleFormat::F32 => build_stream::<f32>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| sample,
             error_sender,
-        )?,
+        ),
         SampleFormat::F64 => build_stream::<f64>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| sample as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::I8 => build_stream::<i8>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| sample as f32 / i8::MAX as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::I16 => build_stream::<i16>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| sample as f32 / i16::MAX as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::I32 => build_stream::<i32>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| sample as f32 / i32::MAX as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::I64 => build_stream::<i64>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| (sample as f64 / i64::MAX as f64) as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::U8 => build_stream::<u8>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             u8_to_f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::U16 => build_stream::<u16>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| (sample as f32 / u16::MAX as f32) * 2.0 - 1.0,
             error_sender,
-        )?,
+        ),
         SampleFormat::U32 => build_stream::<u32>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| (sample as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32,
             error_sender,
-        )?,
+        ),
         SampleFormat::U64 => build_stream::<u64>(
             &device,
             &config,
-            samples.clone(),
+            producer,
+            overflowed.clone(),
             app,
-            emit_counter,
             channels,
-            threshold,
             |sample| (sample as f64 / u64::MAX as f64 * 2.0 - 1.0) as f32,
             error_sender,
-        )?,
-        format => {
-            return Err(FlowError::Audio(format!(
-                "Unsupported microphone sample format: {format:?}"
-            )))
-        }
+        ),
+        format => Err(FlowError::Audio(format!(
+            "Unsupported microphone sample format: {format:?}"
+        ))),
     };
-    stream
-        .play()
-        .map_err(|error| FlowError::Audio(format!("Could not start the microphone: {error}")))?;
-    Ok(ActiveRecording {
-        _stream: stream,
-        samples,
-        sample_rate: config.sample_rate,
+    let stream = stream_result?;
+    let capture_thread = spawn_capture_worker(
+        consumer,
+        config.sample_rate,
+        stop_capture.clone(),
+        overflowed,
+        worker_app,
+        worker_error_sender,
+    )?;
+    let recording = ActiveRecording {
+        stream: Some(stream),
+        capture_thread: Some(capture_thread),
+        stop_capture,
         started: Instant::now(),
         target,
-    })
+    };
+    recording
+        .stream
+        .as_ref()
+        .expect("the recording stream was just created")
+        .play()
+        .map_err(|error| FlowError::Audio(format!("Could not start the microphone: {error}")))?;
+    Ok(recording)
 }
 
-fn finish_recording(recording: ActiveRecording) -> Result<CapturedAudio> {
+fn finish_recording(mut recording: ActiveRecording) -> Result<CapturedAudio> {
     let duration_ms = recording.started.elapsed().as_millis() as i64;
-    drop(recording._stream);
-    let samples = Arc::try_unwrap(recording.samples)
-        .map_err(|_| FlowError::Audio("Could not finish the audio stream.".into()))?
-        .into_inner()
-        .map_err(|_| FlowError::Audio("Recorded audio is unavailable.".into()))?;
-    if samples.len() < (recording.sample_rate / 8) as usize {
+    recording.stream.take();
+    recording.stop_capture.store(true, Ordering::Release);
+    let captured = recording
+        .capture_thread
+        .take()
+        .ok_or_else(|| FlowError::Audio("Recorded audio is unavailable.".into()))?
+        .join()
+        .map_err(|_| FlowError::Audio("The audio capture worker stopped unexpectedly.".into()))?;
+    if captured.sample_count < 2_000 {
         return Err(FlowError::EmptyRecording);
     }
-    if !has_audible_signal(&samples, recording.sample_rate) {
+    if !captured.audible {
         return Err(FlowError::EmptyRecording);
     }
-    let mono_16k = resample(&samples, recording.sample_rate, 16_000);
-    let wav = encode_wav(&mono_16k, 16_000);
     Ok(CapturedAudio {
-        wav,
+        wav: captured.wav,
         duration_ms,
         target: recording.target,
     })
@@ -335,27 +387,6 @@ fn finish_recording(recording: ActiveRecording) -> Result<CapturedAudio> {
 
 fn u8_to_f32(sample: u8) -> f32 {
     (sample as f32 - 128.0) / 128.0
-}
-
-fn has_audible_signal(samples: &[f32], sample_rate: u32) -> bool {
-    const RMS_THRESHOLD: f32 = 0.003;
-    const REQUIRED_WINDOWS: usize = 3;
-
-    let window_size = (sample_rate / 50).max(1) as usize;
-    let mut audible_windows = 0;
-    for window in samples.chunks(window_size) {
-        let mean_square =
-            window.iter().map(|sample| sample * sample).sum::<f32>() / window.len() as f32;
-        if mean_square.sqrt() >= RMS_THRESHOLD {
-            audible_windows += 1;
-            if audible_windows >= REQUIRED_WINDOWS {
-                return true;
-            }
-        } else {
-            audible_windows = 0;
-        }
-    }
-    false
 }
 
 fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
@@ -392,59 +423,35 @@ fn select_device(host: &cpal::Host, microphone_id: &str) -> Result<Device> {
     })
 }
 
+#[allow(clippy::too_many_arguments)] // Keeps the format-specific callback setup explicit.
 fn build_stream<T>(
     device: &Device,
     config: &StreamConfig,
-    samples: Arc<Mutex<Vec<f32>>>,
+    mut producer: HeapProd<f32>,
+    overflowed: Arc<AtomicBool>,
     app: AppHandle,
-    counter: Arc<AtomicUsize>,
     channels: usize,
-    threshold: usize,
     convert: fn(T) -> f32,
     error_sender: mpsc::Sender<RecorderCommand>,
 ) -> Result<Stream>
 where
     T: cpal::SizedSample + Copy + Send + 'static,
 {
-    let error_app = app.clone();
-    let limit_app = app.clone();
-    let limit_sender = error_sender.clone();
-    let maximum_samples = config.sample_rate as usize * 5 * 60;
-    let mut limit_reported = false;
     device
         .build_input_stream(
             config,
             move |data: &[T], _| {
-                let mut mono = Vec::with_capacity(data.len() / channels.max(1));
-                let mut peak = 0.0_f32;
                 for frame in data.chunks(channels.max(1)) {
                     let sample =
                         frame.iter().copied().map(convert).sum::<f32>() / frame.len() as f32;
-                    peak = peak.max(sample.abs());
-                    mono.push(sample);
-                }
-                if let Ok(mut destination) = samples.lock() {
-                    let remaining = maximum_samples.saturating_sub(destination.len());
-                    let accepted = remaining.min(mono.len());
-                    destination.extend_from_slice(&mono[..accepted]);
-                    if accepted < mono.len() && !limit_reported {
-                        limit_reported = true;
-                        let _ = limit_sender.send(RecorderCommand::StreamFailed {
-                            app: limit_app.clone(),
-                            message: "The recording reached the five-minute limit.".into(),
-                        });
+                    if producer.try_push(sample).is_err() {
+                        overflowed.store(true, Ordering::Release);
                     }
-                }
-                if counter.fetch_add(mono.len(), Ordering::Relaxed) + mono.len() >= threshold {
-                    counter.store(0, Ordering::Relaxed);
-                    let responsive = (peak * 3.5).sqrt().min(1.0);
-                    let _ =
-                        app.emit_to("overlay", "waveform", WaveformPayload { level: responsive });
                 }
             },
             move |error| {
                 let _ = error_sender.send(RecorderCommand::StreamFailed {
-                    app: error_app.clone(),
+                    app: app.clone(),
                     message: format!("The microphone stream stopped: {error}"),
                 });
             },
@@ -453,44 +460,99 @@ where
         .map_err(|error| FlowError::Audio(format!("Could not open the microphone: {error}")))
 }
 
-fn resample(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
-    if input_rate == output_rate {
-        return input.to_vec();
-    }
-    let ratio = input_rate as f64 / output_rate as f64;
-    let output_len = (input.len() as f64 / ratio) as usize;
-    (0..output_len)
-        .map(|index| {
-            let position = index as f64 * ratio;
-            let low = position.floor() as usize;
-            let high = (low + 1).min(input.len().saturating_sub(1));
-            let fraction = (position - low as f64) as f32;
-            input[low] * (1.0 - fraction) + input[high] * fraction
+fn spawn_capture_worker(
+    mut consumer: HeapCons<f32>,
+    input_rate: u32,
+    stop: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
+    app: AppHandle,
+    error_sender: mpsc::Sender<RecorderCommand>,
+) -> Result<std::thread::JoinHandle<EncodedCapture>> {
+    std::thread::Builder::new()
+        .name("flow-audio-capture".into())
+        .spawn(move || {
+            const OUTPUT_RATE: u64 = 16_000;
+            const MAX_OUTPUT_SAMPLES: usize = 16_000 * 5 * 60;
+            let mut wav = vec![0_u8; 44];
+            wav.reserve(16_000 * 2 * 30);
+            let mut output_samples = 0_usize;
+            let mut accumulator = 0_u64;
+            let mut peak = 0.0_f32;
+            let mut last_emit = Instant::now();
+            let mut limit_reported = false;
+            let mut overflow_reported = false;
+            let mut audibility = AudibilityDetector::new();
+
+            loop {
+                let mut consumed = false;
+                while let Some(sample) = consumer.try_pop() {
+                    consumed = true;
+                    peak = peak.max(sample.abs());
+                    accumulator += OUTPUT_RATE;
+                    while accumulator >= u64::from(input_rate) {
+                        accumulator -= u64::from(input_rate);
+                        if output_samples < MAX_OUTPUT_SAMPLES {
+                            let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            wav.extend_from_slice(&value.to_le_bytes());
+                            output_samples += 1;
+                            audibility.push(sample);
+                        } else if !limit_reported {
+                            limit_reported = true;
+                            let _ = error_sender.send(RecorderCommand::StreamFailed {
+                                app: app.clone(),
+                                message: "The recording reached the five-minute limit.".into(),
+                            });
+                        }
+                    }
+                }
+
+                if last_emit.elapsed() >= Duration::from_millis(33) {
+                    let responsive = (peak * 3.5).sqrt().min(1.0);
+                    let _ =
+                        app.emit_to("overlay", "waveform", WaveformPayload { level: responsive });
+                    peak = 0.0;
+                    last_emit = Instant::now();
+                }
+                if overflowed.swap(false, Ordering::AcqRel) && !overflow_reported {
+                    overflow_reported = true;
+                    let _ = error_sender.send(RecorderCommand::StreamFailed {
+                        app: app.clone(),
+                        message: "Audio capture could not keep up with the microphone.".into(),
+                    });
+                }
+                if stop.load(Ordering::Acquire) && !consumed {
+                    break;
+                }
+                if !consumed {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+            write_wav_header(&mut wav[..44], output_samples, 16_000);
+            EncodedCapture {
+                wav,
+                sample_count: output_samples,
+                audible: audibility.audible,
+            }
         })
-        .collect()
+        .map_err(|error| {
+            FlowError::Audio(format!("Could not start the audio capture worker: {error}"))
+        })
 }
 
-fn encode_wav(samples: &[f32], sample_rate: u32) -> Vec<u8> {
-    let data_bytes = (samples.len() * 2) as u32;
-    let mut output = Cursor::new(Vec::with_capacity(data_bytes as usize + 44));
-    use std::io::Write;
-    let _ = output.write_all(b"RIFF");
-    let _ = output.write_all(&(36 + data_bytes).to_le_bytes());
-    let _ = output.write_all(b"WAVEfmt ");
-    let _ = output.write_all(&16_u32.to_le_bytes());
-    let _ = output.write_all(&1_u16.to_le_bytes());
-    let _ = output.write_all(&1_u16.to_le_bytes());
-    let _ = output.write_all(&sample_rate.to_le_bytes());
-    let _ = output.write_all(&(sample_rate * 2).to_le_bytes());
-    let _ = output.write_all(&2_u16.to_le_bytes());
-    let _ = output.write_all(&16_u16.to_le_bytes());
-    let _ = output.write_all(b"data");
-    let _ = output.write_all(&data_bytes.to_le_bytes());
-    for sample in samples {
-        let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
-        let _ = output.write_all(&value.to_le_bytes());
-    }
-    output.into_inner()
+fn write_wav_header(header: &mut [u8], sample_count: usize, sample_rate: u32) {
+    let data_bytes = (sample_count * 2) as u32;
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&(36 + data_bytes).to_le_bytes());
+    header[8..16].copy_from_slice(b"WAVEfmt ");
+    header[16..20].copy_from_slice(&16_u32.to_le_bytes());
+    header[20..22].copy_from_slice(&1_u16.to_le_bytes());
+    header[22..24].copy_from_slice(&1_u16.to_le_bytes());
+    header[24..28].copy_from_slice(&sample_rate.to_le_bytes());
+    header[28..32].copy_from_slice(&(sample_rate * 2).to_le_bytes());
+    header[32..34].copy_from_slice(&2_u16.to_le_bytes());
+    header[34..36].copy_from_slice(&16_u16.to_le_bytes());
+    header[36..40].copy_from_slice(b"data");
+    header[40..44].copy_from_slice(&data_bytes.to_le_bytes());
 }
 
 pub fn list_microphones() -> Result<Vec<Microphone>> {
@@ -531,7 +593,15 @@ pub fn list_microphones() -> Result<Vec<Microphone>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{has_audible_signal, u8_to_f32};
+    use super::{u8_to_f32, write_wav_header, AudibilityDetector};
+
+    fn is_audible(samples: &[f32]) -> bool {
+        let mut detector = AudibilityDetector::new();
+        for sample in samples {
+            detector.push(*sample);
+        }
+        detector.audible
+    }
 
     #[test]
     fn unsigned_8_bit_silence_is_centered() {
@@ -540,20 +610,32 @@ mod tests {
 
     #[test]
     fn silence_is_not_audible() {
-        assert!(!has_audible_signal(&vec![0.0; 16_000], 16_000));
+        assert!(!is_audible(&vec![0.0; 16_000]));
     }
 
     #[test]
     fn a_brief_click_is_not_audible() {
         let mut samples = vec![0.0; 16_000];
         samples[1_000] = 1.0;
-        assert!(!has_audible_signal(&samples, 16_000));
+        assert!(!is_audible(&samples));
     }
 
     #[test]
     fn sustained_audio_is_audible() {
         let mut samples = vec![0.0; 16_000];
         samples[1_000..2_280].fill(0.01);
-        assert!(has_audible_signal(&samples, 16_000));
+        assert!(is_audible(&samples));
+    }
+
+    #[test]
+    fn wav_header_describes_incrementally_encoded_pcm() {
+        let mut header = [0_u8; 44];
+        write_wav_header(&mut header, 16_000, 16_000);
+        assert_eq!(&header[0..4], b"RIFF");
+        assert_eq!(&header[8..12], b"WAVE");
+        assert_eq!(
+            u32::from_le_bytes(header[40..44].try_into().unwrap()),
+            32_000
+        );
     }
 }

@@ -11,6 +11,7 @@ const empty: DashboardData = {
   time_dictated_ms: 0,
   estimated_saved_ms: 0,
   history: [],
+  pending: [],
 };
 
 const number = new Intl.NumberFormat();
@@ -47,6 +48,12 @@ export function Dashboard({
 }) {
   const [data, setData] = useState(empty);
   const [loading, setLoading] = useState(true);
+  const [, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -88,12 +95,55 @@ export function Dashboard({
       </div>
 
       <section className="section-block history-section" aria-label="Dictation history">
-        {data.history.length === 0 ? (
+        {data.pending.length > 0 && (
+          <div className="pending-list" aria-label="Recoverable dictations">
+            {data.pending.map((entry) => (
+              <article className="pending-row" key={entry.id}>
+                <div>
+                  <strong>Dictation needs attention</strong>
+                  <p>{entry.text || "The recording is saved and ready to retry."}</p>
+                  {entry.error && <small>{entry.error}</small>}
+                </div>
+                <div className="pending-row__actions">
+                  {entry.text && (
+                    <button
+                      className="secondary-button compact"
+                      onClick={() => void api.copyText(entry.text)
+                        .then(() => notify({ kind: "success", message: "Recovered text copied" }))
+                        .catch((error) => notify({ kind: "error", message: String(error) }))}
+                    >
+                      Copy
+                    </button>
+                  )}
+                  <button
+                    className="secondary-button compact"
+                    onClick={() => void api.retryPendingDictation(entry.id)
+                      .catch((error) => notify({ kind: "error", message: String(error) }))}
+                  >
+                    Retry
+                  </button>
+                  <button
+                    className="secondary-button compact"
+                    onClick={() => void api.deletePendingDictation(entry.id)
+                      .then(() => setData((current) => ({
+                        ...current,
+                        pending: current.pending.filter((item) => item.id !== entry.id),
+                      })))
+                      .catch((error) => notify({ kind: "error", message: String(error) }))}
+                  >
+                    Discard
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+        {data.history.length === 0 && data.pending.length === 0 ? (
           <EmptyState
             title="Your words will land here"
             description={`Press ${keybind} anywhere to start your first dictation.`}
           />
-        ) : (
+        ) : data.history.length > 0 ? (
           <div className="history-list">
             {data.history.map((entry) => (
               <button
@@ -113,7 +163,7 @@ export function Dashboard({
               </button>
             ))}
           </div>
-        )}
+        ) : null}
       </section>
     </section>
   );

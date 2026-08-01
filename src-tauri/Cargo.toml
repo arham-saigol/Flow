@@ -28,6 +28,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "mul
 cpal = "0.17.1"
 hound = "3.5"
 unicode_categories = "0.1"
+aho-corasick = "1"
+ringbuf = "0.4"
+tokio = { version = "1", features = ["time"] }
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Globalization",
