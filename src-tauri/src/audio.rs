@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::{
     error::{FlowError, Result},
-    models::{Microphone, WaveformPayload},
+    models::{MessagePayload, Microphone, WaveformPayload},
     platform::TargetWindow,
 };
 
@@ -99,6 +99,9 @@ enum RecorderCommand {
     },
     Cancel {
         reply: mpsc::SyncSender<Result<()>>,
+    },
+    CaptureLimitReached {
+        app: AppHandle,
     },
     StreamFailed {
         app: AppHandle,
@@ -201,6 +204,26 @@ fn recorder_worker(
                 };
                 recording_flag.store(false, Ordering::Release);
                 let _ = reply.send(result);
+            }
+            RecorderCommand::CaptureLimitReached { app } => {
+                let Some(recording) = active.take() else {
+                    continue;
+                };
+                let result = finish_recording(recording);
+                crate::platform::set_recording(false);
+                recording_flag.store(false, Ordering::Release);
+                match result {
+                    Ok(captured) => {
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(error) =
+                                crate::workflow::process_captured(&app, captured, None).await
+                            {
+                                crate::workflow::report_error(&app, error);
+                            }
+                        });
+                    }
+                    Err(error) => crate::workflow::report_error(&app, error),
+                }
             }
             RecorderCommand::StreamFailed { app, message } => {
                 if active.take().is_some() {
@@ -477,6 +500,8 @@ fn spawn_capture_worker(
             wav.reserve(16_000 * 2 * 30);
             let mut output_samples = 0_usize;
             let mut accumulator = 0_u64;
+            let mut window_sum = 0.0_f32;
+            let mut window_len = 0_u32;
             let mut peak = 0.0_f32;
             let mut last_emit = Instant::now();
             let mut limit_reported = false;
@@ -488,20 +513,33 @@ fn spawn_capture_worker(
                 while let Some(sample) = consumer.try_pop() {
                     consumed = true;
                     peak = peak.max(sample.abs());
+                    window_sum += sample;
+                    window_len += 1;
                     accumulator += OUTPUT_RATE;
                     while accumulator >= u64::from(input_rate) {
                         accumulator -= u64::from(input_rate);
+                        let averaged = if window_len == 0 {
+                            sample
+                        } else {
+                            window_sum / window_len as f32
+                        };
+                        window_sum = 0.0;
+                        window_len = 0;
                         if output_samples < MAX_OUTPUT_SAMPLES {
-                            let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                            let value = (averaged.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                             wav.extend_from_slice(&value.to_le_bytes());
                             output_samples += 1;
-                            audibility.push(sample);
+                            audibility.push(averaged);
                         } else if !limit_reported {
                             limit_reported = true;
-                            let _ = error_sender.send(RecorderCommand::StreamFailed {
-                                app: app.clone(),
-                                message: "The recording reached the five-minute limit.".into(),
-                            });
+                            stop.store(true, Ordering::Release);
+                            crate::platform::set_recording(false);
+                            let _ = app.emit(
+                                "flow-warning",
+                                MessagePayload {
+                                    message: "The recording reached the five-minute limit and will be processed now.".into(),
+                                },
+                            );
                         }
                     }
                 }
@@ -528,11 +566,15 @@ fn spawn_capture_worker(
                 }
             }
             write_wav_header(&mut wav[..44], output_samples, 16_000);
-            EncodedCapture {
+            let captured = EncodedCapture {
                 wav,
                 sample_count: output_samples,
                 audible: audibility.audible,
+            };
+            if limit_reported {
+                let _ = error_sender.send(RecorderCommand::CaptureLimitReached { app });
             }
+            captured
         })
         .map_err(|error| {
             FlowError::Audio(format!("Could not start the audio capture worker: {error}"))

@@ -48,6 +48,7 @@ export function Dashboard({
 }) {
   const [data, setData] = useState(empty);
   const [loading, setLoading] = useState(true);
+  const [retryingId, setRetryingId] = useState<number | null>(null);
   const [, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -97,45 +98,55 @@ export function Dashboard({
       <section className="section-block history-section" aria-label="Dictation history">
         {data.pending.length > 0 && (
           <div className="pending-list" aria-label="Recoverable dictations">
-            {data.pending.map((entry) => (
-              <article className="pending-row" key={entry.id}>
-                <div>
-                  <strong>Dictation needs attention</strong>
-                  <p>{entry.text || "The recording is saved and ready to retry."}</p>
-                  {entry.error && <small>{entry.error}</small>}
-                </div>
-                <div className="pending-row__actions">
-                  {entry.text && (
+            {data.pending.map((entry) => {
+              const actionsDisabled = retryingId !== null;
+              return (
+                <article className="pending-row" key={entry.id}>
+                  <div>
+                    <strong>Dictation needs attention</strong>
+                    <p>{entry.text || "The recording is saved and ready to retry."}</p>
+                    {entry.error && <small>{entry.error}</small>}
+                  </div>
+                  <div className="pending-row__actions">
+                    {entry.text && (
+                      <button
+                        className="secondary-button compact"
+                        disabled={actionsDisabled}
+                        onClick={() => void api.copyText(entry.text)
+                          .then(() => notify({ kind: "success", message: "Recovered text copied" }))
+                          .catch((error) => notify({ kind: "error", message: String(error) }))}
+                      >
+                        Copy
+                      </button>
+                    )}
                     <button
                       className="secondary-button compact"
-                      onClick={() => void api.copyText(entry.text)
-                        .then(() => notify({ kind: "success", message: "Recovered text copied" }))
+                      disabled={actionsDisabled}
+                      onClick={() => {
+                        setRetryingId(entry.id);
+                        void api.retryPendingDictation(entry.id)
+                          .catch((error) => notify({ kind: "error", message: String(error) }))
+                          .finally(() => setRetryingId(null));
+                      }}
+                    >
+                      Retry
+                    </button>
+                    <button
+                      className="secondary-button compact"
+                      disabled={actionsDisabled}
+                      onClick={() => void api.deletePendingDictation(entry.id)
+                        .then(() => setData((current) => ({
+                          ...current,
+                          pending: current.pending.filter((item) => item.id !== entry.id),
+                        })))
                         .catch((error) => notify({ kind: "error", message: String(error) }))}
                     >
-                      Copy
+                      Discard
                     </button>
-                  )}
-                  <button
-                    className="secondary-button compact"
-                    onClick={() => void api.retryPendingDictation(entry.id)
-                      .catch((error) => notify({ kind: "error", message: String(error) }))}
-                  >
-                    Retry
-                  </button>
-                  <button
-                    className="secondary-button compact"
-                    onClick={() => void api.deletePendingDictation(entry.id)
-                      .then(() => setData((current) => ({
-                        ...current,
-                        pending: current.pending.filter((item) => item.id !== entry.id),
-                      })))
-                      .catch((error) => notify({ kind: "error", message: String(error) }))}
-                  >
-                    Discard
-                  </button>
-                </div>
-              </article>
-            ))}
+                  </div>
+                </article>
+              );
+            })}
           </div>
         )}
         {data.history.length === 0 && data.pending.length === 0 ? (

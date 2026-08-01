@@ -160,18 +160,23 @@ fn transcription_prompt(preferred_spellings: &[String]) -> String {
 }
 
 fn cleanup_system_prompt(transcript: &str, corrections: &[(String, String)]) -> String {
-    let transcript = transcript.to_lowercase();
+    let transcript = transcript
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
     let mut selected = Vec::new();
     let mut used_chars = 0;
     for (incorrect, correct) in corrections {
-        if selected.len() >= MAX_CLEANUP_CORRECTIONS
-            || !contains_whole_phrase(&transcript, &incorrect.to_lowercase())
-        {
+        if selected.len() >= MAX_CLEANUP_CORRECTIONS {
+            break;
+        }
+        if !contains_whole_phrase(&transcript, &incorrect.to_lowercase()) {
             continue;
         }
         let item_chars = incorrect.chars().count() + correct.chars().count();
         if used_chars + item_chars > MAX_CLEANUP_GUIDANCE_CHARS {
-            break;
+            continue;
         }
         used_chars += item_chars;
         selected.push((incorrect, correct));
@@ -275,6 +280,15 @@ mod tests {
             cleanup_system_prompt("Nothing to change.", &[("btw".into(), "by the way".into())]),
             CLEANUP_PROMPT
         );
+    }
+
+    #[test]
+    fn cleanup_prompt_normalizes_transcript_spacing() {
+        let prompt = cleanup_system_prompt(
+            "Please say four  word clearly.",
+            &[("four word".into(), "foreword".into())],
+        );
+        assert!(prompt.contains(r#""incorrect":"four word""#));
     }
 
     #[test]

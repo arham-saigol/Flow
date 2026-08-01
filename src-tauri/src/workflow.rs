@@ -104,6 +104,29 @@ async fn stop_and_process_with_target(
             return Err(error);
         }
     };
+    process_captured_inner(app, recording, target).await
+}
+
+pub(crate) async fn process_captured(
+    app: &AppHandle,
+    recording: crate::audio::CapturedAudio,
+    target: Option<platform::TargetWindow>,
+) -> Result<()> {
+    let state = app.state::<AppState>();
+    if state.processing.swap(true, Ordering::AcqRel) {
+        return Err(FlowError::Message(
+            "Flow is already processing a dictation.".into(),
+        ));
+    }
+    process_captured_inner(app, recording, target).await
+}
+
+async fn process_captured_inner(
+    app: &AppHandle,
+    recording: crate::audio::CapturedAudio,
+    target: Option<platform::TargetWindow>,
+) -> Result<()> {
+    let state = app.state::<AppState>();
     // Capture the destination when dictation is stopped. Processing may take
     // several seconds, during which the foreground window can change again.
     let paste_target = target.unwrap_or(recording.target);
@@ -469,13 +492,7 @@ fn normalize_correction_replacement(value: &str) -> String {
 }
 
 fn friendly_error(error: FlowError) -> String {
-    match error {
-        FlowError::Network(_) => {
-            "Flow couldn’t reach Groq. Check your connection and try again.".into()
-        }
-        FlowError::Windows(message) => message,
-        other => other.to_string(),
-    }
+    friendly_error_ref(&error)
 }
 
 fn friendly_error_ref(error: &FlowError) -> String {

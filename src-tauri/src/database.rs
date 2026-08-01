@@ -383,16 +383,29 @@ impl Database {
     pub fn save_pending_to_history(&self, id: i64, retention: &str) -> Result<()> {
         let mut conn = self.conn()?;
         let transaction = conn.transaction()?;
-        let (text, raw_text, duration_ms, history_saved): (String, String, i64, bool) = transaction
+        let (text, raw_text, duration_ms, history_saved): (
+            Option<String>,
+            Option<String>,
+            i64,
+            bool,
+        ) = transaction
             .query_row(
                 "SELECT final_text, raw_text, duration_ms, history_saved
              FROM pending_dictations WHERE id = ?1",
                 [id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )?;
+            )
+            .optional()?
+            .ok_or_else(|| {
+                FlowError::Message("That recoverable dictation no longer exists.".into())
+            })?;
         if history_saved {
             return Ok(());
         }
+        let text = text.ok_or_else(|| {
+            FlowError::Message("That recoverable dictation is not ready to save.".into())
+        })?;
+        let raw_text = raw_text.unwrap_or_default();
         let word_count = text.split_whitespace().count() as i64;
         let now = Self::now();
         transaction.execute(
@@ -770,6 +783,11 @@ mod tests {
         let path = database_path("pending-dictation");
         let database = Database::open(&path).unwrap();
         let id = database.insert_pending_recording(b"wav", 1_500).unwrap();
+        let not_ready = database.save_pending_to_history(id, "30 days").unwrap_err();
+        assert_eq!(
+            not_ready.to_string(),
+            "That recoverable dictation is not ready to save."
+        );
         let recording = database.pending_dictation(id).unwrap();
         assert_eq!(recording.wav.as_deref(), Some(b"wav".as_slice()));
 
@@ -788,6 +806,11 @@ mod tests {
 
         database.delete_pending(id).unwrap();
         assert!(database.dashboard().unwrap().pending.is_empty());
+        let missing = database.save_pending_to_history(id, "30 days").unwrap_err();
+        assert_eq!(
+            missing.to_string(),
+            "That recoverable dictation no longer exists."
+        );
         drop(database);
         let _ = std::fs::remove_file(path);
     }

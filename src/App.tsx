@@ -136,6 +136,7 @@ export default function App() {
       notify({ kind: "success", message: event.payload.message });
     });
     const unlistenError = listen<{ message: string }>("flow-error", (event) => {
+      setDashboardVersion((version) => version + 1);
       notify({ kind: "error", message: event.payload.message });
     });
     const unlistenWarning = listen<{ message: string }>("flow-warning", (event) => {

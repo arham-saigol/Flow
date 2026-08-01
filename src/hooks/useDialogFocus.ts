@@ -16,7 +16,9 @@ export function useDialogFocus(
 ) {
   const dialogRef = useRef<HTMLElement>(null);
   const onEscapeRef = useRef(onEscape);
-  onEscapeRef.current = onEscape;
+  useEffect(() => {
+    onEscapeRef.current = onEscape;
+  }, [onEscape]);
 
   useEffect(() => {
     if (!open) return;
