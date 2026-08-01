@@ -90,6 +90,13 @@ async fn stop_and_process_with_target(
     target: Option<platform::TargetWindow>,
 ) -> Result<()> {
     let state = app.state::<AppState>();
+    if !state.recorder.is_recording() {
+        return if state.capture_limit_processing.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(FlowError::NotRecording)
+        };
+    }
     if state.processing.swap(true, Ordering::AcqRel) {
         return Err(FlowError::Message(
             "Flow is already processing a dictation.".into(),
@@ -99,6 +106,11 @@ async fn stop_and_process_with_target(
     let recording = match state.recorder.stop() {
         Ok(recording) => recording,
         Err(error) => {
+            if matches!(error, FlowError::NotRecording)
+                && state.capture_limit_processing.load(Ordering::Acquire)
+            {
+                return Ok(());
+            }
             state.processing.store(false, Ordering::Release);
             state.busy.store(false, Ordering::Release);
             return Err(error);
@@ -107,18 +119,25 @@ async fn stop_and_process_with_target(
     process_captured_inner(app, recording, target).await
 }
 
-pub(crate) async fn process_captured(
+pub(crate) fn process_captured_in_background(
     app: &AppHandle,
     recording: crate::audio::CapturedAudio,
-    target: Option<platform::TargetWindow>,
-) -> Result<()> {
+) {
     let state = app.state::<AppState>();
-    if state.processing.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::Message(
-            "Flow is already processing a dictation.".into(),
-        ));
-    }
-    process_captured_inner(app, recording, target).await
+    state
+        .capture_limit_processing
+        .store(true, Ordering::Release);
+    state.processing.store(true, Ordering::Release);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = process_captured_inner(&app, recording, None).await;
+        app.state::<AppState>()
+            .capture_limit_processing
+            .store(false, Ordering::Release);
+        if let Err(error) = result {
+            report_error(&app, error);
+        }
+    });
 }
 
 async fn process_captured_inner(

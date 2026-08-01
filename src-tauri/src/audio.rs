@@ -213,15 +213,7 @@ fn recorder_worker(
                 crate::platform::set_recording(false);
                 recording_flag.store(false, Ordering::Release);
                 match result {
-                    Ok(captured) => {
-                        tauri::async_runtime::spawn(async move {
-                            if let Err(error) =
-                                crate::workflow::process_captured(&app, captured, None).await
-                            {
-                                crate::workflow::report_error(&app, error);
-                            }
-                        });
-                    }
+                    Ok(captured) => crate::workflow::process_captured_in_background(&app, captured),
                     Err(error) => crate::workflow::report_error(&app, error),
                 }
             }
