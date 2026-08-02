@@ -29,6 +29,7 @@ pub struct AppState {
     pub groq: GroqClient,
     pub busy: AtomicBool,
     pub processing: AtomicBool,
+    pub capture_limit_processing: AtomicBool,
 }
 
 #[tauri::command]
@@ -186,13 +187,22 @@ fn start_recording(app: AppHandle) -> Result<()> {
 
 #[tauri::command]
 async fn stop_recording(app: AppHandle) -> Result<()> {
-    workflow::stop_and_process(&app).await;
-    Ok(())
+    workflow::stop_and_process(&app).await
 }
 
 #[tauri::command]
-fn cancel_recording(app: AppHandle) {
-    workflow::cancel(&app);
+async fn retry_pending_dictation(app: AppHandle, id: i64) -> Result<()> {
+    workflow::retry_pending(&app, id).await
+}
+
+#[tauri::command]
+fn delete_pending_dictation(state: State<'_, AppState>, id: i64) -> Result<()> {
+    state.database.delete_pending(id)
+}
+
+#[tauri::command]
+fn cancel_recording(app: AppHandle) -> Result<()> {
+    workflow::cancel(&app)
 }
 
 pub(crate) fn show_main(app: &AppHandle) {
@@ -271,6 +281,7 @@ pub fn run() {
                 groq,
                 busy: AtomicBool::new(false),
                 processing: AtomicBool::new(false),
+                capture_limit_processing: AtomicBool::new(false),
             });
 
             create_tray(app, &settings.keybind)?;
@@ -308,6 +319,8 @@ pub fn run() {
             start_recording,
             stop_recording,
             cancel_recording,
+            retry_pending_dictation,
+            delete_pending_dictation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flow");

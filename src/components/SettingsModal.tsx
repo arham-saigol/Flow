@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { type RefObject, useEffect, useState } from "react";
 import {
   AudioLines,
   Check,
@@ -10,6 +10,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { api } from "../api";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { Microphone, SettingsData } from "../types";
 import type { ToastData } from "./Toast";
 
@@ -37,10 +38,12 @@ export function SettingsModal({
   onClose,
   notify,
   onSaved,
+  returnFocusRef,
 }: {
   onClose: () => void;
   notify: (data: ToastData) => void;
   onSaved: (keybind: string) => void;
+  returnFocusRef: RefObject<HTMLElement>;
 }) {
   const [settings, setSettings] = useState(defaults);
   const [microphones, setMicrophones] = useState<Microphone[]>([]);
@@ -53,6 +56,15 @@ export function SettingsModal({
   const [activeTab, setActiveTab] = useState<"general" | "transcription">("general");
   const [capturingHotkey, setCapturingHotkey] = useState(false);
   const [hotkeyError, setHotkeyError] = useState("");
+  const dialogRef = useDialogFocus(true, returnFocusRef, () => {
+    if (saving) return;
+    if (capturingHotkey) {
+      setCapturingHotkey(false);
+      setHotkeyError("");
+    } else {
+      onClose();
+    }
+  });
 
   useEffect(() => {
     void api
@@ -89,7 +101,12 @@ export function SettingsModal({
     try {
       const selected = microphones.find((item) => item.id === settings.microphone_id);
       await api.saveSettings(
-        { ...settings, microphone_name: selected?.name ?? settings.microphone_name },
+        {
+          ...settings,
+          microphone_name: settings.microphone_id
+            ? selected?.name ?? settings.microphone_name
+            : "System default",
+        },
         apiKey || undefined,
       );
       notify({ kind: "success", message: "Settings saved" });
@@ -129,6 +146,7 @@ export function SettingsModal({
       role="presentation"
       onMouseDown={(event) => {
         if (event.target !== event.currentTarget) return;
+        if (saving) return;
         if (capturingHotkey) {
           setCapturingHotkey(false);
           setHotkeyError("");
@@ -137,7 +155,14 @@ export function SettingsModal({
         }
       }}
     >
-      <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <section
+        ref={dialogRef}
+        className="settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        tabIndex={-1}
+      >
         <header>
           <h2 id="settings-title">Settings</h2>
         </header>
@@ -272,7 +297,7 @@ export function SettingsModal({
         </div>
 
         <footer>
-          <button className="secondary-button" onClick={onClose}>Cancel</button>
+          <button className="secondary-button" disabled={saving} onClick={onClose}>Cancel</button>
           <button className="primary-button" disabled={!settingsLoaded || saving} onClick={() => void save()}>
             {saving && <LoaderCircle className="spin" size={16} />}
             {saving ? "Saving…" : "Save settings"}

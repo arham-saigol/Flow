@@ -196,6 +196,14 @@ kbd {
 .history-row:hover { background: rgba(55, 53, 48, .035); }
 .history-row time { color: var(--muted); font-size: 12px; }
 .history-row p { min-width: 0; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
+.pending-list { display: grid; border-bottom: 1px solid var(--border); background: #f5eee4; }
+.pending-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 18px; }
+.pending-row + .pending-row { border-top: 1px solid var(--border-soft); }
+.pending-row > div:first-child { min-width: 0; }
+.pending-row strong { display: block; font-size: 12px; }
+.pending-row p { margin: 4px 0 0; max-width: 520px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
+.pending-row small { display: block; margin-top: 4px; color: #8d352c; font-size: 11px; }
+.pending-row__actions { flex: 0 0 auto; display: flex; gap: 6px; }
 
 input, textarea, select {
   width: 100%;

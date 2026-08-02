@@ -1126,9 +1126,11 @@ dependencies = [
 name = "flow"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "cpal",
  "hound",
  "reqwest 0.12.28",
+ "ringbuf",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1137,6 +1139,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-single-instance",
  "thiserror 2.0.19",
+ "tokio",
  "unicode_categories",
  "windows 0.58.0",
 ]
@@ -2772,6 +2775,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic"
+version = "1.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d20d5497ef88037a52ff98267d066e7f11fcc5e99bbfbd58a42336193aacec3"
+
+[[package]]
+name = "portable-atomic-util"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a106d1259c23fac8e543272398ae0e3c0b8d33c88ed73d0cc71b0f1d902618"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3138,6 +3156,17 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "ringbuf"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe47b720588c8702e34b5979cb3271a8b1842c7cb6f57408efa70c779363488c"
+dependencies = [
+ "crossbeam-utils",
+ "portable-atomic",
+ "portable-atomic-util",
 ]
 
 [[package]]

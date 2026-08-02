@@ -12,14 +12,26 @@ const focusableSelector = [
 export function useDialogFocus(
   open: boolean,
   returnFocusRef: RefObject<HTMLElement>,
+  onEscape?: () => void,
 ) {
   const dialogRef = useRef<HTMLElement>(null);
+  const onEscapeRef = useRef(onEscape);
+  useEffect(() => {
+    onEscapeRef.current = onEscape;
+  }, [onEscape]);
 
   useEffect(() => {
     if (!open) return;
     const dialog = dialogRef.current;
+    const firstFocusable = dialog?.querySelector<HTMLElement>(focusableSelector);
+    (firstFocusable ?? dialog)?.focus();
 
     const containFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && onEscapeRef.current) {
+        event.preventDefault();
+        onEscapeRef.current();
+        return;
+      }
       if (event.key !== "Tab" || !dialog) return;
       const focusable = Array.from(
         dialog.querySelectorAll<HTMLElement>(focusableSelector),
