@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     LazyLock, Mutex,
 };
 
@@ -20,6 +20,132 @@ static ERROR_DISMISS_TASK: LazyLock<Mutex<Option<tauri::async_runtime::JoinHandl
 static CORRECTION_MATCHER: LazyLock<Mutex<CorrectionMatcherCache>> =
     LazyLock::new(|| Mutex::new(CorrectionMatcherCache::default()));
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WorkflowPhase {
+    Idle,
+    Starting,
+    Recording,
+    Processing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotkeyOutcome {
+    Start,
+    Stop,
+    Busy(WorkflowPhase),
+}
+
+pub struct WorkflowState {
+    phase: AtomicU8,
+}
+
+impl WorkflowState {
+    pub fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(WorkflowPhase::Idle as u8),
+        }
+    }
+
+    fn phase(&self) -> WorkflowPhase {
+        match self.phase.load(Ordering::Acquire) {
+            value if value == WorkflowPhase::Starting as u8 => WorkflowPhase::Starting,
+            value if value == WorkflowPhase::Recording as u8 => WorkflowPhase::Recording,
+            value if value == WorkflowPhase::Processing as u8 => WorkflowPhase::Processing,
+            _ => WorkflowPhase::Idle,
+        }
+    }
+
+    fn hotkey_press(&self) -> HotkeyOutcome {
+        loop {
+            let phase = self.phase();
+            let (next, outcome) = match phase {
+                WorkflowPhase::Idle => (WorkflowPhase::Starting, HotkeyOutcome::Start),
+                WorkflowPhase::Recording => (WorkflowPhase::Processing, HotkeyOutcome::Stop),
+                WorkflowPhase::Starting | WorkflowPhase::Processing => {
+                    return HotkeyOutcome::Busy(phase)
+                }
+            };
+            if self
+                .phase
+                .compare_exchange(phase as u8, next as u8, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return outcome;
+            }
+        }
+    }
+
+    fn begin_start(&self) -> Result<()> {
+        self.phase
+            .compare_exchange(
+                WorkflowPhase::Idle as u8,
+                WorkflowPhase::Starting as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| FlowError::Message("Flow is busy with another dictation.".into()))
+    }
+
+    fn begin_stop(&self) -> Result<()> {
+        match self.phase.compare_exchange(
+            WorkflowPhase::Recording as u8,
+            WorkflowPhase::Processing as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(()),
+            Err(value) if value == WorkflowPhase::Idle as u8 => Err(FlowError::NotRecording),
+            Err(_) => Err(FlowError::Message(
+                "Flow is busy with another dictation.".into(),
+            )),
+        }
+    }
+
+    fn begin_retry(&self) -> Result<()> {
+        self.phase
+            .compare_exchange(
+                WorkflowPhase::Idle as u8,
+                WorkflowPhase::Processing as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ())
+            .map_err(|_| FlowError::Message("Flow is busy with another dictation.".into()))
+    }
+
+    fn begin_capture_limit_processing(&self) {
+        let _ = self.phase.compare_exchange(
+            WorkflowPhase::Recording as u8,
+            WorkflowPhase::Processing as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    fn recording_started(&self) {
+        self.phase
+            .store(WorkflowPhase::Recording as u8, Ordering::Release);
+    }
+
+    fn failed(&self) {
+        self.phase
+            .store(WorkflowPhase::Idle as u8, Ordering::Release);
+    }
+
+    fn finished(&self) {
+        self.phase
+            .store(WorkflowPhase::Idle as u8, Ordering::Release);
+    }
+}
+
+impl Default for WorkflowState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Default)]
 struct CorrectionMatcherCache {
     corrections: Vec<(String, String)>,
@@ -36,72 +162,61 @@ pub async fn toggle_from_tray(app: &AppHandle) {
 
 async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
-    if state.recorder.is_recording() {
-        if let Err(error) = stop_and_process_with_target(app, target).await {
-            let _ = reported_error(app, error);
+    let result = match state.workflow.hotkey_press() {
+        HotkeyOutcome::Start => start_reserved(app, target),
+        HotkeyOutcome::Stop => stop_reserved(app, target).await,
+        HotkeyOutcome::Busy(phase) => {
+            show_busy_feedback(app, phase);
+            return;
         }
-    } else if !state.busy.load(Ordering::Acquire) {
-        if let Err(error) = start_with_target(app, target) {
-            let _ = reported_error(app, error);
-        }
+    };
+    if let Err(error) = result {
+        let _ = reported_error(app, error);
     }
 }
 
 pub fn start(app: &AppHandle) -> Result<()> {
-    start_with_target(app, None).map_err(|error| reported_error(app, error))
+    let state = app.state::<AppState>();
+    state.workflow.begin_start()?;
+    start_reserved(app, None).map_err(|error| reported_error(app, error))
 }
 
-fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
+fn start_reserved(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
     let state = app.state::<AppState>();
-    if state.busy.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::AlreadyRecording);
-    }
     ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
     cancel_error_dismiss();
     let result = (|| {
-        let has_key = credentials::has_api_key();
-        if !has_key {
+        if !credentials::has_api_key() {
             return Err(FlowError::MissingApiKey);
         }
         let settings = state.database.settings(true)?;
         let target = target.unwrap_or_else(platform::capture_target);
         platform::prepare_overlay(app, target)?;
-        emit_overlay(app, "recording", None);
+        emit_overlay(app, "starting", Some("Starting"));
         state
             .recorder
             .start(app.clone(), &settings.microphone_id, target)?;
+        state.workflow.recording_started();
         platform::set_recording(true);
+        emit_overlay(app, "recording", None);
         Ok(())
     })();
     if result.is_err() {
-        state.busy.store(false, Ordering::Release);
+        state.workflow.failed();
     }
     result
 }
 
 pub async fn stop_and_process(app: &AppHandle) -> Result<()> {
-    stop_and_process_with_target(app, Some(platform::capture_target()))
+    let state = app.state::<AppState>();
+    state.workflow.begin_stop()?;
+    stop_reserved(app, Some(platform::capture_target()))
         .await
         .map_err(|error| reported_error(app, error))
 }
 
-async fn stop_and_process_with_target(
-    app: &AppHandle,
-    target: Option<platform::TargetWindow>,
-) -> Result<()> {
+async fn stop_reserved(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
     let state = app.state::<AppState>();
-    if !state.recorder.is_recording() {
-        return if state.capture_limit_processing.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(FlowError::NotRecording)
-        };
-    }
-    if state.processing.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::Message(
-            "Flow is already processing a dictation.".into(),
-        ));
-    }
     platform::set_recording(false);
     let recording = match state.recorder.stop() {
         Ok(recording) => recording,
@@ -111,8 +226,7 @@ async fn stop_and_process_with_target(
             {
                 return Ok(());
             }
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
+            state.workflow.failed();
             return Err(error);
         }
     };
@@ -127,7 +241,7 @@ pub(crate) fn process_captured_in_background(
     state
         .capture_limit_processing
         .store(true, Ordering::Release);
-    state.processing.store(true, Ordering::Release);
+    state.workflow.begin_capture_limit_processing();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = process_captured_inner(&app, recording, None).await;
@@ -155,8 +269,7 @@ async fn process_captured_inner(
     {
         Ok(id) => id,
         Err(error) => {
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
+            state.workflow.failed();
             return Err(error);
         }
     };
@@ -164,6 +277,8 @@ async fn process_captured_inner(
 }
 
 pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
+    let state = app.state::<AppState>();
+    state.workflow.begin_retry()?;
     retry_pending_inner(app, id)
         .await
         .map_err(|error| reported_error(app, error))
@@ -171,23 +286,11 @@ pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
 
 async fn retry_pending_inner(app: &AppHandle, id: i64) -> Result<()> {
     let state = app.state::<AppState>();
-    if state.busy.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::Message(
-            "Flow is busy with another dictation.".into(),
-        ));
-    }
-    if state.processing.swap(true, Ordering::AcqRel) {
-        state.busy.store(false, Ordering::Release);
-        return Err(FlowError::Message(
-            "Flow is already processing a dictation.".into(),
-        ));
-    }
     ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
     cancel_error_dismiss();
     let overlay_target = platform::capture_target();
     if let Err(error) = platform::prepare_overlay(app, overlay_target) {
-        state.processing.store(false, Ordering::Release);
-        state.busy.store(false, Ordering::Release);
+        state.workflow.failed();
         return Err(error);
     }
     run_pending(app, id, None).await
@@ -272,15 +375,13 @@ async fn run_pending(
                     message: completion_message.into(),
                 },
             );
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
+            state.workflow.finished();
             Ok(())
         }
         Err(error) => {
             let message = friendly_error_ref(&error);
             let _ = state.database.save_pending_error(pending_id, &message);
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
+            state.workflow.failed();
             Err(error)
         }
     }
@@ -293,7 +394,7 @@ pub fn cancel(app: &AppHandle) -> Result<()> {
         .cancel()
         .map_err(|error| reported_error(app, error))?;
     platform::set_recording(false);
-    state.busy.store(false, Ordering::Release);
+    state.workflow.finished();
     let _ = app.emit_to("overlay", "overlay-dismiss", ());
     let generation = ERROR_GENERATION.load(Ordering::Acquire);
     let app_clone = app.clone();
@@ -313,8 +414,8 @@ pub fn report_error(app: &AppHandle, error: FlowError) {
 fn reported_error(app: &AppHandle, error: FlowError) -> FlowError {
     platform::set_recording(false);
     let state = app.state::<AppState>();
-    if !state.processing.load(Ordering::Acquire) {
-        state.busy.store(false, Ordering::Release);
+    if state.workflow.phase() != WorkflowPhase::Processing {
+        state.workflow.failed();
     }
     let message = friendly_error(error);
     eprintln!("Flow error: {message}");
@@ -349,6 +450,23 @@ fn cancel_error_dismiss() {
             task.abort();
         }
     }
+}
+
+fn show_busy_feedback(app: &AppHandle, phase: WorkflowPhase) {
+    let message = match phase {
+        WorkflowPhase::Starting => "Flow is starting",
+        WorkflowPhase::Processing => "Flow is busy",
+        WorkflowPhase::Idle | WorkflowPhase::Recording => return,
+    };
+    let target = platform::remembered_target().unwrap_or_else(platform::capture_target);
+    let _ = platform::prepare_overlay(app, target);
+    let _ = app.emit_to(
+        "overlay",
+        "overlay-notice",
+        MessagePayload {
+            message: message.into(),
+        },
+    );
 }
 
 fn emit_overlay(app: &AppHandle, phase: &str, message: Option<&str>) {
@@ -528,7 +646,10 @@ fn friendly_error_ref(error: &FlowError) -> String {
 mod tests {
     use crate::models::DictionaryEntry;
 
-    use super::{dictionary_guidance, normalize_with_corrections};
+    use super::{
+        dictionary_guidance, normalize_with_corrections, HotkeyOutcome, WorkflowPhase,
+        WorkflowState,
+    };
 
     #[test]
     fn regular_dictionary_words_never_reach_cleanup_guidance() {
@@ -599,6 +720,57 @@ mod tests {
         assert_eq!(
             normalize_with_corrections("c sharper", &corrections),
             "see sharper"
+        );
+    }
+
+    #[test]
+    fn hotkey_state_machine_handles_every_phase() {
+        let state = WorkflowState::new();
+
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+        assert_eq!(state.phase(), WorkflowPhase::Starting);
+        assert_eq!(
+            state.hotkey_press(),
+            HotkeyOutcome::Busy(WorkflowPhase::Starting)
+        );
+
+        state.recording_started();
+        assert_eq!(state.phase(), WorkflowPhase::Recording);
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Stop);
+        assert_eq!(state.phase(), WorkflowPhase::Processing);
+        assert_eq!(
+            state.hotkey_press(),
+            HotkeyOutcome::Busy(WorkflowPhase::Processing)
+        );
+
+        state.finished();
+        assert_eq!(state.phase(), WorkflowPhase::Idle);
+    }
+
+    #[test]
+    fn failures_return_the_state_machine_to_idle() {
+        let state = WorkflowState::new();
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+        state.failed();
+        assert_eq!(state.phase(), WorkflowPhase::Idle);
+
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+        state.recording_started();
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Stop);
+        state.failed();
+
+        assert_eq!(state.phase(), WorkflowPhase::Idle);
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+    }
+
+    #[test]
+    fn rapid_presses_are_acknowledged_before_the_recorder_starts() {
+        let state = WorkflowState::new();
+
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+        assert_eq!(
+            state.hotkey_press(),
+            HotkeyOutcome::Busy(WorkflowPhase::Starting)
         );
     }
 }

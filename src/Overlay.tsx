@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as Progress from "@radix-ui/react-progress";
 
-type Phase = "recording" | "analysing" | "thinking" | "error";
+type Phase = "starting" | "recording" | "analysing" | "thinking" | "error";
 
 interface OverlayState {
   phase: Phase;
@@ -15,6 +15,8 @@ export default function Overlay() {
   const [progress, setProgress] = useState(0);
   const [appearanceKey, setAppearanceKey] = useState(0);
   const [isClosing, setIsClosing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimeout = useRef<number | null>(null);
   const targetLevel = useRef(0);
   const displayedLevel = useRef(0);
   const lastPublishedLevel = useRef(0);
@@ -78,7 +80,11 @@ export default function Overlay() {
         processingComplete.current = false;
         publishProgress(0);
         scheduleAnimation();
-      } else if (nextState.phase === "recording" || nextState.phase === "error") {
+      } else if (
+        nextState.phase === "starting" ||
+        nextState.phase === "recording" ||
+        nextState.phase === "error"
+      ) {
         setIsClosing(false);
         setAppearanceKey((current) => current + 1);
         processingStartedAt.current = null;
@@ -86,6 +92,16 @@ export default function Overlay() {
         publishProgress(0);
         scheduleAnimation();
       }
+    });
+    const noticeListener = listen<{ message: string }>("overlay-notice", (event) => {
+      setNotice(event.payload.message);
+      if (noticeTimeout.current !== null) {
+        window.clearTimeout(noticeTimeout.current);
+      }
+      noticeTimeout.current = window.setTimeout(() => {
+        setNotice(null);
+        noticeTimeout.current = null;
+      }, 900);
     });
     const dismissalListener = listen("overlay-dismiss", () => {
       setIsClosing(true);
@@ -105,7 +121,11 @@ export default function Overlay() {
 
     return () => {
       window.cancelAnimationFrame(animationFrame);
+      if (noticeTimeout.current !== null) {
+        window.clearTimeout(noticeTimeout.current);
+      }
       void stateListener.then((fn) => fn());
+      void noticeListener.then((fn) => fn());
       void dismissalListener.then((fn) => fn());
       void completionListener.then((fn) => fn());
       void waveListener.then((fn) => fn());
@@ -121,7 +141,9 @@ export default function Overlay() {
       key={appearanceKey}
       className={`overlay-bar overlay-bar--${state.phase}${isClosing ? " overlay-bar--closing" : ""}`}
     >
-      {state.phase === "recording" ? (
+      {notice !== null ? (
+        <div className="overlay-error" role="status">{notice}</div>
+      ) : state.phase === "recording" ? (
         <div className="waveform" aria-label="Recording. Press Escape to cancel.">
           {waveformProfile.map((weight, index) => (
             <i

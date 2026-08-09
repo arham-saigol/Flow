@@ -27,8 +27,7 @@ pub struct AppState {
     pub database: Database,
     pub recorder: AudioRecorder,
     pub groq: GroqClient,
-    pub busy: AtomicBool,
-    pub processing: AtomicBool,
+    pub workflow: workflow::WorkflowState,
     pub capture_limit_processing: AtomicBool,
 }
 
@@ -279,8 +278,7 @@ pub fn run() {
                 database,
                 recorder: AudioRecorder::new(),
                 groq,
-                busy: AtomicBool::new(false),
-                processing: AtomicBool::new(false),
+                workflow: workflow::WorkflowState::new(),
                 capture_limit_processing: AtomicBool::new(false),
             });
 

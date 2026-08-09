@@ -9,11 +9,18 @@ const MAX_TRANSCRIPTION_GUIDANCE_ITEMS: usize = 100;
 const MAX_TRANSCRIPTION_GUIDANCE_CHARS: usize = 2_000;
 const MAX_CLEANUP_CORRECTIONS: usize = 64;
 const MAX_CLEANUP_GUIDANCE_CHARS: usize = 4_000;
-const CLEANUP_PROMPT: &str = r#"You are the final writing pass for a voice dictation tool. Transform the raw transcript into polished, ready-to-send writing.
+const CLEANUP_PROMPT: &str = r#"You are the final writing pass for a voice dictation tool. Transform the raw transcript into polished, ready-to-send writing without changing what the speaker communicated.
 
-Correct spelling, grammar, punctuation, capitalization, names, and formatting. Remove filler words, repetition, false starts, and fluff. Rephrase only when it helps clarity. Preserve the speaker's exact intent, tone, facts, and level of certainty. Never add, infer, or invent information. Do not answer the speaker or comment on the text.
+You may correct spelling, grammar, punctuation, capitalization, names, formatting, and obvious speech disfluencies such as an immediately repeated word or abandoned false start. You may organize the same content into paragraphs, lists, or other clearer structure.
 
-Return only the final text with no quotation marks, preamble, labels, markdown fences, or explanation."#;
+Fidelity is the highest priority:
+- Do not omit any detail, qualifier, example, request, fact, opinion, or uncertainty expressed by the speaker.
+- Do not change the meaning, tone, point of view, or level of certainty.
+- Do not make unsupported substitutions, additions, inferences, or factual corrections.
+- Do not subjectively remove words as “fluff” or rewrite merely to make the speaker more concise.
+- When uncertain whether a word carries meaning, preserve it.
+
+Do not answer the speaker or comment on the text. Return only the final text with no quotation marks, preamble, labels, markdown fences, or explanation."#;
 
 #[derive(Deserialize)]
 struct TranscriptionResponse {
@@ -74,13 +81,16 @@ impl GroqClient {
             .map_err(|error| {
                 FlowError::Message(format!("Could not prepare the recording: {error}"))
             })?;
-        let form = multipart::Form::new()
+        let mut form = multipart::Form::new()
             .part("file", file)
             .text("model", "whisper-large-v3")
             .text("response_format", "json")
             .text("temperature", "0")
-            .text("language", "en")
             .text("prompt", prompt);
+        // Omitting the language field lets Whisper detect the spoken language.
+        if let Some(language) = transcription_language() {
+            form = form.text("language", language);
+        }
         let response = self
             .client
             .post(format!("{API_BASE}/audio/transcriptions"))
@@ -131,10 +141,36 @@ impl GroqClient {
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message.content.trim().to_string())
-            .filter(|content| !content.is_empty())
-            .ok_or_else(|| FlowError::Message("Groq returned an empty response.".into()))?;
-        Ok(output)
+            .map(|choice| choice.message.content)
+            .unwrap_or_default();
+        Ok(faithful_cleanup_or_transcript(transcript, &output))
+    }
+}
+
+fn transcription_language() -> Option<&'static str> {
+    None
+}
+
+fn faithful_cleanup_or_transcript(transcript: &str, cleanup: &str) -> String {
+    let cleanup = cleanup.trim();
+    let transcript_content = transcript
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+    let cleanup_content = cleanup
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .count();
+
+    // Cleanup should mostly rearrange and punctuate the transcript. A large
+    // loss of textual content is a conservative signal that details may have
+    // been dropped; preserving the raw transcript is safer than guessing.
+    let suspiciously_destructive = cleanup.is_empty()
+        || (transcript_content >= 12 && cleanup_content * 100 < transcript_content * 60);
+    if suspiciously_destructive {
+        transcript.to_string()
+    } else {
+        cleanup.to_string()
     }
 }
 
@@ -243,7 +279,10 @@ async fn response_error(response: reqwest::Response) -> Result<reqwest::Response
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_system_prompt, transcription_prompt, CLEANUP_PROMPT};
+    use super::{
+        cleanup_system_prompt, faithful_cleanup_or_transcript, transcription_language,
+        transcription_prompt, CLEANUP_PROMPT,
+    };
 
     #[test]
     fn transcription_prompt_contains_only_preferred_spellings() {
@@ -257,6 +296,37 @@ mod tests {
     #[test]
     fn cleanup_prompt_is_unchanged_without_corrections() {
         assert_eq!(cleanup_system_prompt("hello", &[]), CLEANUP_PROMPT);
+    }
+
+    #[test]
+    fn cleanup_prompt_requires_every_spoken_detail_to_be_preserved() {
+        assert!(CLEANUP_PROMPT.contains("Do not omit any detail"));
+        assert!(CLEANUP_PROMPT.contains("Do not change the meaning"));
+        assert!(CLEANUP_PROMPT.contains("unsupported substitutions"));
+        assert!(CLEANUP_PROMPT.contains("subjectively remove words as “fluff”"));
+    }
+
+    #[test]
+    fn destructive_cleanup_falls_back_to_the_raw_transcript() {
+        let transcript =
+            "Meet Priya at the west entrance at 4:15 and bring both signed contract copies.";
+
+        assert_eq!(
+            faithful_cleanup_or_transcript(transcript, "Meet Priya at 4:15."),
+            transcript
+        );
+        assert_eq!(
+            faithful_cleanup_or_transcript(
+                transcript,
+                "Meet Priya at the west entrance at 4:15, and bring both signed contract copies."
+            ),
+            "Meet Priya at the west entrance at 4:15, and bring both signed contract copies."
+        );
+    }
+
+    #[test]
+    fn transcription_uses_automatic_language_detection() {
+        assert_eq!(transcription_language(), None);
     }
 
     #[test]
