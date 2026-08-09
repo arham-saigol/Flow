@@ -528,46 +528,27 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
             ));
         }
 
-        match paste_delivery(temporary.is_some()) {
-            PasteDelivery::UnicodeInput => {
-                // Some clipboard formats cannot be copied safely or exceed the
-                // bounded backup size. Leave that clipboard untouched and use
-                // Unicode input, including Enter events for multiline text.
-                send_unicode(text)
-            }
-            PasteDelivery::Clipboard => {
-                let temporary = temporary.expect("clipboard delivery requires a backup");
-                let paste_result = send_paste_shortcut();
-                if paste_result.is_ok() {
-                    // Ctrl+V is queued input. Keep the eager text available long
-                    // enough for the destination's input handler to read it.
-                    thread::sleep(Duration::from_millis(300));
-                }
-                let restore_result = restore_clipboard(&temporary.original, temporary.token);
-                match (paste_result, restore_result) {
-                    (Ok(()), Ok(())) => Ok(()),
-                    (Err(error), Ok(())) => Err(error),
-                    (Ok(()), Err(error)) => Err(error),
-                    (Err(paste_error), Err(restore_error)) => Err(FlowError::Windows(format!(
-                        "{paste_error} The previous clipboard also could not be restored: {restore_error}"
-                    ))),
-                }
-            }
+        let Some(temporary) = temporary else {
+            // Some clipboard formats cannot be copied safely or exceed the
+            // bounded backup size. Leave that clipboard untouched and use
+            // Unicode input, including Enter events for multiline text.
+            return send_unicode(text);
+        };
+        let paste_result = send_paste_shortcut();
+        if paste_result.is_ok() {
+            // Ctrl+V is queued input. Keep the eager text available long
+            // enough for the destination's input handler to read it.
+            thread::sleep(Duration::from_millis(300));
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PasteDelivery {
-    Clipboard,
-    UnicodeInput,
-}
-
-fn paste_delivery(clipboard_was_preserved: bool) -> PasteDelivery {
-    if clipboard_was_preserved {
-        PasteDelivery::Clipboard
-    } else {
-        PasteDelivery::UnicodeInput
+        let restore_result = restore_clipboard(&temporary.original, temporary.token);
+        match (paste_result, restore_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(paste_error), Err(restore_error)) => Err(FlowError::Windows(format!(
+                "{paste_error} The previous clipboard also could not be restored: {restore_error}"
+            ))),
+        }
     }
 }
 
@@ -990,8 +971,7 @@ fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 #[cfg(test)]
 mod tests {
     use super::{
-        clipboard_unchanged, encode_clipboard_text, is_hglobal_clipboard_format, paste_delivery,
-        ClipboardToken, PasteDelivery,
+        clipboard_unchanged, encode_clipboard_text, is_hglobal_clipboard_format, ClipboardToken,
     };
 
     #[test]
@@ -1030,17 +1010,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_clipboard_formats_fall_back_without_replacing_the_clipboard() {
+    fn unsupported_clipboard_formats_cannot_be_preserved() {
         assert!(!is_hglobal_clipboard_format(2)); // CF_BITMAP
-        assert_eq!(paste_delivery(false), PasteDelivery::UnicodeInput);
-    }
-
-    #[test]
-    fn multiline_text_uses_unicode_input_when_the_clipboard_cannot_be_preserved() {
-        let text = "first line\nsecond line";
-
-        assert!(text.contains('\n'));
-        assert_eq!(paste_delivery(false), PasteDelivery::UnicodeInput);
-        assert_eq!(paste_delivery(true), PasteDelivery::Clipboard);
     }
 }

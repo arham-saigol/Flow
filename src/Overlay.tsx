@@ -73,6 +73,7 @@ export default function Overlay() {
 
     const stateListener = listen<OverlayState>("overlay-state", (event) => {
       const nextState = event.payload;
+      setNotice(null);
       setState(nextState);
 
       if (nextState.phase === "analysing") {
@@ -104,6 +105,7 @@ export default function Overlay() {
       }, 900);
     });
     const dismissalListener = listen("overlay-dismiss", () => {
+      setNotice(null);
       setIsClosing(true);
     });
     const completionListener = listen("overlay-progress-complete", () => {

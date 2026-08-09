@@ -124,9 +124,15 @@ impl WorkflowState {
         );
     }
 
-    fn recording_started(&self) {
+    fn recording_started(&self) -> bool {
         self.phase
-            .store(WorkflowPhase::Recording as u8, Ordering::Release);
+            .compare_exchange(
+                WorkflowPhase::Starting as u8,
+                WorkflowPhase::Recording as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     fn failed(&self) {
@@ -196,7 +202,12 @@ fn start_reserved(app: &AppHandle, target: Option<platform::TargetWindow>) -> Re
         state
             .recorder
             .start(app.clone(), &settings.microphone_id, target)?;
-        state.workflow.recording_started();
+        if !state.workflow.recording_started() {
+            let _ = state.recorder.cancel();
+            return Err(FlowError::Audio(
+                "The microphone stopped while Flow was starting.".into(),
+            ));
+        }
         platform::set_recording(true);
         emit_overlay(app, "recording", None);
         Ok(())
@@ -734,7 +745,7 @@ mod tests {
             HotkeyOutcome::Busy(WorkflowPhase::Starting)
         );
 
-        state.recording_started();
+        assert!(state.recording_started());
         assert_eq!(state.phase(), WorkflowPhase::Recording);
         assert_eq!(state.hotkey_press(), HotkeyOutcome::Stop);
         assert_eq!(state.phase(), WorkflowPhase::Processing);
@@ -755,12 +766,23 @@ mod tests {
         assert_eq!(state.phase(), WorkflowPhase::Idle);
 
         assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
-        state.recording_started();
+        assert!(state.recording_started());
         assert_eq!(state.hotkey_press(), HotkeyOutcome::Stop);
         state.failed();
 
         assert_eq!(state.phase(), WorkflowPhase::Idle);
         assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+    }
+
+    #[test]
+    fn interrupted_start_cannot_restore_the_recording_phase() {
+        let state = WorkflowState::new();
+
+        assert_eq!(state.hotkey_press(), HotkeyOutcome::Start);
+        state.failed();
+
+        assert!(!state.recording_started());
+        assert_eq!(state.phase(), WorkflowPhase::Idle);
     }
 
     #[test]

@@ -81,16 +81,13 @@ impl GroqClient {
             .map_err(|error| {
                 FlowError::Message(format!("Could not prepare the recording: {error}"))
             })?;
-        let mut form = multipart::Form::new()
+        // Omitting the language field lets Whisper detect the spoken language.
+        let form = multipart::Form::new()
             .part("file", file)
             .text("model", "whisper-large-v3")
             .text("response_format", "json")
             .text("temperature", "0")
             .text("prompt", prompt);
-        // Omitting the language field lets Whisper detect the spoken language.
-        if let Some(language) = transcription_language() {
-            form = form.text("language", language);
-        }
         let response = self
             .client
             .post(format!("{API_BASE}/audio/transcriptions"))
@@ -147,10 +144,6 @@ impl GroqClient {
     }
 }
 
-fn transcription_language() -> Option<&'static str> {
-    None
-}
-
 fn faithful_cleanup_or_transcript(transcript: &str, cleanup: &str) -> String {
     let cleanup = cleanup.trim();
     let transcript_content = transcript
@@ -166,7 +159,7 @@ fn faithful_cleanup_or_transcript(transcript: &str, cleanup: &str) -> String {
     // loss of textual content is a conservative signal that details may have
     // been dropped; preserving the raw transcript is safer than guessing.
     let suspiciously_destructive = cleanup.is_empty()
-        || (transcript_content >= 12 && cleanup_content * 100 < transcript_content * 60);
+        || cleanup_content.saturating_mul(5) < transcript_content.saturating_mul(3);
     if suspiciously_destructive {
         transcript.to_string()
     } else {
@@ -280,8 +273,7 @@ async fn response_error(response: reqwest::Response) -> Result<reqwest::Response
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_system_prompt, faithful_cleanup_or_transcript, transcription_language,
-        transcription_prompt, CLEANUP_PROMPT,
+        cleanup_system_prompt, faithful_cleanup_or_transcript, transcription_prompt, CLEANUP_PROMPT,
     };
 
     #[test]
@@ -316,17 +308,16 @@ mod tests {
             transcript
         );
         assert_eq!(
+            faithful_cleanup_or_transcript("Call Priya", "No"),
+            "Call Priya"
+        );
+        assert_eq!(
             faithful_cleanup_or_transcript(
                 transcript,
                 "Meet Priya at the west entrance at 4:15, and bring both signed contract copies."
             ),
             "Meet Priya at the west entrance at 4:15, and bring both signed contract copies."
         );
-    }
-
-    #[test]
-    fn transcription_uses_automatic_language_detection() {
-        assert_eq!(transcription_language(), None);
     }
 
     #[test]
