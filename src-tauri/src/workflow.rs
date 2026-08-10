@@ -321,7 +321,10 @@ async fn run_pending(
     emit_overlay(app, "analysing", Some("Analyzing"));
     let result = async {
         let pending = state.database.pending_dictation(pending_id)?;
-        let settings = state.database.settings(true, true)?;
+        let settings = state.database.settings(
+            credentials::has_groq_api_key(),
+            credentials::has_deepgram_api_key(),
+        )?;
         let transcript = if let Some(transcript) = pending.raw_text.clone() {
             transcript
         } else {
