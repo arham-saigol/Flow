@@ -601,14 +601,17 @@ body:has(.overlay-bar) #root {
   transition: transform 130ms cubic-bezier(.2, .75, .35, 1);
   will-change: transform;
 }
-.overlay-error {
+.overlay-error,
+.overlay-notice {
   max-width: 100px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   text-align: center;
-  color: #e4e1dc;
   font-size: 11px;
+}
+.overlay-error {
+  color: #e4e1dc;
 }
 .overlay-bar--analysing,
 .overlay-bar--thinking {

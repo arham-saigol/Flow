@@ -60,7 +60,36 @@ impl DeepgramClient {
         preferred_spellings: &[String],
     ) -> Result<String> {
         let keyterms = transcription_keyterms(preferred_spellings);
-        let response = self
+        let mut response = self
+            .send_transcription(api_key, wav.clone(), &keyterms)
+            .await?;
+        if response.status() == StatusCode::BAD_REQUEST && !keyterms.is_empty() {
+            response = self.send_transcription(api_key, wav, &[]).await?;
+        }
+        let response = response_error(response).await?;
+        let transcript = response
+            .json::<TranscriptionResponse>()
+            .await?
+            .results
+            .channels
+            .into_iter()
+            .next()
+            .and_then(|channel| channel.alternatives.into_iter().next())
+            .map(|alternative| alternative.transcript.trim().to_string())
+            .unwrap_or_default();
+        if transcript.is_empty() {
+            return Err(FlowError::Message("No speech was detected.".into()));
+        }
+        Ok(transcript)
+    }
+
+    async fn send_transcription(
+        &self,
+        api_key: &str,
+        wav: Vec<u8>,
+        keyterms: &[&str],
+    ) -> Result<reqwest::Response> {
+        Ok(self
             .client
             .post(format!("{API_BASE}/listen"))
             .header(header::AUTHORIZATION, authorization(api_key))
@@ -78,22 +107,7 @@ impl DeepgramClient {
             )
             .body(wav)
             .send()
-            .await?;
-        let response = response_error(response).await?;
-        let transcript = response
-            .json::<TranscriptionResponse>()
-            .await?
-            .results
-            .channels
-            .into_iter()
-            .next()
-            .and_then(|channel| channel.alternatives.into_iter().next())
-            .map(|alternative| alternative.transcript.trim().to_string())
-            .unwrap_or_default();
-        if transcript.is_empty() {
-            return Err(FlowError::Message("No speech was detected.".into()));
-        }
-        Ok(transcript)
+            .await?)
     }
 }
 

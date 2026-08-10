@@ -381,7 +381,12 @@ async fn run_pending(
             .database
             .save_pending_to_history(pending.id, &settings.history_retention)?;
         let completion_message = if let Some(paste_target) = paste_target {
-            platform::paste_text(paste_target, &final_text)?;
+            let text = final_text.clone();
+            tauri::async_runtime::spawn_blocking(move || platform::paste_text(paste_target, &text))
+                .await
+                .map_err(|error| {
+                    FlowError::Message(format!("Could not finish pasting: {error}"))
+                })??;
             "Dictation pasted"
         } else {
             platform::copy_text(&final_text)?;

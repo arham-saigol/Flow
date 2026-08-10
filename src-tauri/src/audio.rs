@@ -111,11 +111,10 @@ enum RecorderCommand {
 impl AudioRecorder {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let worker_recording = Arc::new(AtomicBool::new(false));
         let error_sender = sender.clone();
         std::thread::Builder::new()
             .name("flow-audio".into())
-            .spawn(move || recorder_worker(receiver, worker_recording, error_sender))
+            .spawn(move || recorder_worker(receiver, error_sender))
             .expect("could not start Flow audio worker");
         Self { sender }
     }
@@ -158,7 +157,6 @@ impl AudioRecorder {
 
 fn recorder_worker(
     receiver: mpsc::Receiver<RecorderCommand>,
-    recording_flag: Arc<AtomicBool>,
     error_sender: mpsc::Sender<RecorderCommand>,
 ) {
     let mut active: Option<ActiveRecording> = None;
@@ -173,12 +171,8 @@ fn recorder_worker(
                 let result = if active.is_some() {
                     Err(FlowError::AlreadyRecording)
                 } else {
-                    begin_recording(app, &microphone_id, target, error_sender.clone()).map(
-                        |recording| {
-                            active = Some(recording);
-                            recording_flag.store(true, Ordering::Release);
-                        },
-                    )
+                    begin_recording(app, &microphone_id, target, error_sender.clone())
+                        .map(|recording| active = Some(recording))
                 };
                 let _ = reply.send(result);
             }
@@ -187,7 +181,6 @@ fn recorder_worker(
                     .take()
                     .ok_or(FlowError::NotRecording)
                     .and_then(finish_recording);
-                recording_flag.store(false, Ordering::Release);
                 let _ = reply.send(result);
             }
             RecorderCommand::Cancel { reply } => {
@@ -196,7 +189,6 @@ fn recorder_worker(
                 } else {
                     Err(FlowError::NotRecording)
                 };
-                recording_flag.store(false, Ordering::Release);
                 let _ = reply.send(result);
             }
             RecorderCommand::CaptureLimitReached { app } => {
@@ -205,7 +197,6 @@ fn recorder_worker(
                 };
                 let result = finish_recording(recording);
                 crate::platform::set_recording(false);
-                recording_flag.store(false, Ordering::Release);
                 match result {
                     Ok(captured) => crate::workflow::process_captured_in_background(&app, captured),
                     Err(error) => crate::workflow::report_error(&app, error),
@@ -213,7 +204,6 @@ fn recorder_worker(
             }
             RecorderCommand::StreamFailed { app, message } => {
                 if active.take().is_some() {
-                    recording_flag.store(false, Ordering::Release);
                     crate::workflow::report_error(&app, FlowError::Audio(message));
                 }
             }

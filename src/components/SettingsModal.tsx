@@ -297,11 +297,12 @@ export function SettingsModal({
                     </select>
                   </label>
 
-                  <label className="field">
-                    <span>Groq API key</span>
+                  <div className="field">
+                    <label htmlFor="groq-api-key">Groq API key</label>
                     <div className="secret-field">
                       <KeyRound size={16} />
                       <input
+                        id="groq-api-key"
                         type={showGroqKey ? "text" : "password"}
                         value={groqApiKey}
                         autoComplete="off"
@@ -315,17 +316,18 @@ export function SettingsModal({
                         {showGroqKey ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
-                  </label>
+                  </div>
                   <button className="secondary-button compact" disabled={!groqApiKey || testing !== null} onClick={() => void test("groq")}>
                     {testing === "groq" ? <LoaderCircle className="spin" size={15} /> : groqTested ? <Check size={15} /> : null}
                     {testing === "groq" ? "Checking…" : groqTested ? "Connected" : "Test Groq connection"}
                   </button>
 
-                  <label className="field">
-                    <span>Deepgram API key</span>
+                  <div className="field">
+                    <label htmlFor="deepgram-api-key">Deepgram API key</label>
                     <div className="secret-field">
                       <KeyRound size={16} />
                       <input
+                        id="deepgram-api-key"
                         type={showDeepgramKey ? "text" : "password"}
                         value={deepgramApiKey}
                         autoComplete="off"
@@ -339,7 +341,7 @@ export function SettingsModal({
                         {showDeepgramKey ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
-                  </label>
+                  </div>
                   <button className="secondary-button compact" disabled={!deepgramApiKey || testing !== null} onClick={() => void test("deepgram")}>
                     {testing === "deepgram" ? <LoaderCircle className="spin" size={15} /> : deepgramTested ? <Check size={15} /> : null}
                     {testing === "deepgram" ? "Checking…" : deepgramTested ? "Connected" : "Test Deepgram connection"}
