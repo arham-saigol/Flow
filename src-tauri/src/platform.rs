@@ -28,8 +28,8 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL, VK_ESCAPE,
-                VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
+                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
+                VK_RWIN, VK_SHIFT,
             },
             WindowsAndMessaging::{
                 CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW, IsWindow,
@@ -512,35 +512,25 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
 
         let temporary = prepare_temporary_clipboard(text)?;
         if GetForegroundWindow().0 != target.0 {
-            if let Some(temporary) = temporary.as_ref() {
-                restore_clipboard(&temporary.original, temporary.token)?;
-            }
+            restore_temporary_clipboard(&temporary)?;
             return Err(FlowError::Windows(
                 "The dictation target lost focus before Flow could paste.".into(),
             ));
         }
         if shortcut_modifiers_down() {
-            if let Some(temporary) = temporary.as_ref() {
-                restore_clipboard(&temporary.original, temporary.token)?;
-            }
+            restore_temporary_clipboard(&temporary)?;
             return Err(FlowError::Windows(
                 "A modifier key was pressed before Flow could paste the dictation.".into(),
             ));
         }
 
-        let Some(temporary) = temporary else {
-            // Some clipboard formats cannot be copied safely or exceed the
-            // bounded backup size. Leave that clipboard untouched and use
-            // Unicode input, including Enter events for multiline text.
-            return send_unicode(text);
-        };
         let paste_result = send_paste_shortcut();
         if paste_result.is_ok() {
             // Ctrl+V is queued input. Keep the eager text available long
             // enough for the destination's input handler to read it.
             thread::sleep(Duration::from_millis(300));
         }
-        let restore_result = restore_clipboard(&temporary.original, temporary.token);
+        let restore_result = restore_temporary_clipboard(&temporary);
         match (paste_result, restore_result) {
             (Ok(()), Ok(())) => Ok(()),
             (Err(error), Ok(())) => Err(error),
@@ -563,7 +553,7 @@ fn clipboard_unchanged(expected: ClipboardToken, current: ClipboardToken) -> boo
 }
 
 struct TemporaryClipboard {
-    original: Vec<ClipboardItem>,
+    original: Option<Vec<ClipboardItem>>,
     token: ClipboardToken,
 }
 
@@ -579,50 +569,71 @@ unsafe fn current_clipboard_token() -> ClipboardToken {
     }
 }
 
-unsafe fn prepare_temporary_clipboard(text: &str) -> Result<Option<TemporaryClipboard>> {
+unsafe fn prepare_temporary_clipboard(text: &str) -> Result<TemporaryClipboard> {
     let owner = clipboard_owner()?;
     let wide = encode_clipboard_text(text);
     let allocation = allocate_clipboard_wide(&wide)?;
     let Some(rendered_owner) = render_delayed_clipboard_with_timeout(owner) else {
         let _ = GlobalFree(allocation);
-        return Ok(None);
+        return replace_clipboard_without_backup(text);
     };
     if open_clipboard_with_retry(owner, "Could not preserve the clipboard").is_err() {
         let _ = GlobalFree(allocation);
-        return Ok(None);
+        return replace_clipboard_without_backup(text);
     }
     let captured_owner = GetClipboardOwner().map_or(0, |owner| owner.0 as isize);
     if captured_owner != rendered_owner {
         let _ = CloseClipboard();
         let _ = GlobalFree(allocation);
-        return Ok(None);
+        return replace_clipboard_without_backup(text);
     }
     let original = match capture_open_clipboard() {
         Some(original) => original,
         None => {
             let _ = CloseClipboard();
             let _ = GlobalFree(allocation);
-            return Ok(None);
+            return replace_clipboard_without_backup(text);
         }
     };
     if EmptyClipboard().is_err() {
         let _ = CloseClipboard();
         let _ = GlobalFree(allocation);
-        return Ok(None);
+        return replace_clipboard_without_backup(text);
     }
     if let Err(replace_error) = set_clipboard_wide(allocation) {
         let token = current_clipboard_token();
         let _ = CloseClipboard();
-        return match restore_clipboard(&original, token) {
-            Ok(()) => Ok(None),
-            Err(restore_error) => Err(FlowError::Windows(format!(
+        restore_clipboard(&original, token).map_err(|restore_error| {
+            FlowError::Windows(format!(
                 "{replace_error} The previous clipboard also could not be restored: {restore_error}"
-            ))),
-        };
+            ))
+        })?;
+        return replace_clipboard_without_backup(text);
     }
     let token = current_clipboard_token();
     let _ = CloseClipboard();
-    Ok(Some(TemporaryClipboard { original, token }))
+    Ok(TemporaryClipboard {
+        original: Some(original),
+        token,
+    })
+}
+
+unsafe fn replace_clipboard_without_backup(text: &str) -> Result<TemporaryClipboard> {
+    // A clipboard can contain owner-managed or oversized formats that cannot
+    // be duplicated safely. Text delivery still uses one atomic clipboard
+    // paste; in this rare case the dictation remains on the clipboard.
+    write_clipboard_text(text)?;
+    Ok(TemporaryClipboard {
+        original: None,
+        token: current_clipboard_token(),
+    })
+}
+
+unsafe fn restore_temporary_clipboard(temporary: &TemporaryClipboard) -> Result<()> {
+    match temporary.original.as_ref() {
+        Some(original) => restore_clipboard(original, temporary.token),
+        None => Ok(()),
+    }
 }
 
 unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> Option<isize> {
@@ -655,6 +666,7 @@ unsafe fn capture_open_clipboard() -> Option<Vec<ClipboardItem>> {
     const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
     const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
+    let had_formats = CountClipboardFormats() > 0;
     let mut items = Vec::new();
     let mut total_bytes: usize = 0;
     let mut previous_format = 0;
@@ -667,25 +679,28 @@ unsafe fn capture_open_clipboard() -> Option<Vec<ClipboardItem>> {
             }
             break;
         }
+        previous_format = format;
+
+        // Preserve every bounded HGLOBAL representation. Owner-managed/GDI
+        // variants are skipped when the clipboard also exposes a safe semantic
+        // equivalent such as CF_DIB or Unicode text.
         if !is_hglobal_clipboard_format(format) {
-            return None;
+            continue;
         }
-        let handle = match GetClipboardData(format) {
-            Ok(handle) => handle,
-            Err(_) => return None,
+        let Ok(handle) = GetClipboardData(format) else {
+            continue;
         };
         let allocation = HGLOBAL(handle.0);
         let size = GlobalSize(allocation);
-        if size == 0 {
-            return None;
-        }
-        let next_total = total_bytes.checked_add(size)?;
-        if size > MAX_ITEM_BYTES || next_total > MAX_TOTAL_BYTES {
-            return None;
+        let Some(next_total) = total_bytes.checked_add(size) else {
+            continue;
+        };
+        if size == 0 || size > MAX_ITEM_BYTES || next_total > MAX_TOTAL_BYTES {
+            continue;
         }
         let pointer = GlobalLock(allocation).cast::<u8>();
         if pointer.is_null() {
-            return None;
+            continue;
         }
         items.push(ClipboardItem {
             format,
@@ -693,12 +708,12 @@ unsafe fn capture_open_clipboard() -> Option<Vec<ClipboardItem>> {
         });
         total_bytes = next_total;
         let _ = GlobalUnlock(allocation);
-        previous_format = format;
     }
-    if CountClipboardFormats() > 0 && items.is_empty() {
-        return None;
+    if had_formats && items.is_empty() {
+        None
+    } else {
+        Some(items)
     }
-    Some(items)
 }
 
 fn is_hglobal_clipboard_format(format: u32) -> bool {
@@ -861,46 +876,6 @@ unsafe fn send_paste_shortcut() -> Result<()> {
         "Windows accepted {inserted} of {} paste shortcut events. {cleanup_status}",
         inputs.len()
     )))
-}
-
-unsafe fn send_unicode(text: &str) -> Result<()> {
-    const INPUTS_PER_CHUNK: usize = 128;
-
-    let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '\r' {
-            if characters.peek() == Some(&'\n') {
-                characters.next();
-            }
-            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
-        } else if character == '\n' {
-            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
-        } else {
-            let mut encoded = [0_u16; 2];
-            for unit in character.encode_utf16(&mut encoded) {
-                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE));
-                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-            }
-        }
-    }
-
-    for chunk in inputs.chunks(INPUTS_PER_CHUNK) {
-        let mut sent = 0;
-        while sent < chunk.len() {
-            let inserted = SendInput(&chunk[sent..], size_of::<INPUT>() as i32) as usize;
-            if inserted == 0 {
-                return Err(FlowError::Windows(format!(
-                    "Windows accepted {sent} of {} keyboard input events in the current chunk.",
-                    chunk.len()
-                )));
-            }
-            sent += inserted;
-        }
-    }
-    Ok(())
 }
 
 unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {
