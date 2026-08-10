@@ -163,6 +163,11 @@ impl Database {
         has_deepgram_api_key: bool,
     ) -> Result<SettingsData> {
         let defaults = SettingsData::default();
+        let default_transcription_model = if has_groq_api_key && !has_deepgram_api_key {
+            crate::models::TranscriptionModel::GroqWhisperLargeV3
+        } else {
+            defaults.transcription_model
+        };
         Ok(SettingsData {
             has_groq_api_key,
             has_deepgram_api_key,
@@ -170,7 +175,7 @@ impl Database {
                 .setting("transcription_model")?
                 .as_deref()
                 .and_then(crate::models::TranscriptionModel::from_setting)
-                .unwrap_or(defaults.transcription_model),
+                .unwrap_or(default_transcription_model),
             microphone_id: self
                 .setting("microphone_id")?
                 .unwrap_or(defaults.microphone_id),
@@ -800,6 +805,19 @@ mod tests {
         assert_eq!(
             missing.to_string(),
             "That recoverable dictation no longer exists."
+        );
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn existing_groq_install_keeps_groq_as_its_transcription_model() {
+        let path = database_path("legacy-transcription-model");
+        let database = Database::open(&path).unwrap();
+
+        assert_eq!(
+            database.settings(true, false).unwrap().transcription_model,
+            TranscriptionModel::GroqWhisperLargeV3
         );
         drop(database);
         let _ = std::fs::remove_file(path);
