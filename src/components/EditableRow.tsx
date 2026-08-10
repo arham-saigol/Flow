@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useRef, useState } from "react";
 import { Pencil, Trash2 } from "lucide-react";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { DictionaryEntry } from "../types";
@@ -20,7 +20,6 @@ export function EditableRow({
   const [draftCorrection, setDraftCorrection] = useState(entry.correction ?? "");
   const [correctingMisspelling, setCorrectingMisspelling] = useState(entry.correction !== null);
   const editButtonRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useDialogFocus(editing, editButtonRef);
 
   const close = () => {
     if (saving) return;
@@ -29,15 +28,7 @@ export function EditableRow({
     setCorrectingMisspelling(entry.correction !== null);
     setEditing(false);
   };
-
-  useEffect(() => {
-    if (!editing) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [editing, saving, entry.value, entry.correction]);
+  const dialogRef = useDialogFocus(editing, editButtonRef, close);
 
   const save = async (event: FormEvent) => {
     event.preventDefault();

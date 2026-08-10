@@ -229,7 +229,7 @@ fn create_tray(
             "dictate" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    workflow::toggle_from_tray(&app).await;
+                    workflow::toggle(&app).await;
                 });
             }
             "quit" => app.exit(0),

@@ -295,31 +295,6 @@ impl Database {
         })
     }
 
-    pub fn insert_history(&self, text: &str, raw_text: &str, duration_ms: i64) -> Result<()> {
-        let word_count = text.split_whitespace().count() as i64;
-        let mut conn = self.conn()?;
-        let transaction = conn.transaction()?;
-        transaction.execute(
-            "INSERT INTO history(text, raw_text, word_count, duration_ms, created_at)
-             VALUES(?1, ?2, ?3, ?4, ?5)",
-            params![text, raw_text, word_count, duration_ms, Self::now()],
-        )?;
-        transaction.execute(
-            "INSERT INTO aggregate_stats(id, total_words, total_duration_ms)
-             VALUES(1, ?1, ?2)
-             ON CONFLICT(id) DO UPDATE SET
-                 total_words = total_words + excluded.total_words,
-                 total_duration_ms = total_duration_ms + excluded.total_duration_ms",
-            params![word_count, duration_ms],
-        )?;
-        transaction.execute(
-            "INSERT INTO weekly_stats(word_count, duration_ms, created_at) VALUES(?1, ?2, ?3)",
-            params![word_count, duration_ms, Self::now()],
-        )?;
-        transaction.commit()?;
-        Ok(())
-    }
-
     pub fn insert_pending_recording(&self, wav: &[u8], duration_ms: i64) -> Result<i64> {
         let now = Self::now();
         let conn = self.conn()?;
@@ -819,9 +794,10 @@ mod tests {
     fn weekly_stats_outlive_short_content_retention() {
         let path = database_path("weekly-retention");
         let database = Database::open(&path).unwrap();
-        database
-            .insert_history("one two", "one two", 1_000)
-            .unwrap();
+        let id = database.insert_pending_recording(b"wav", 1_000).unwrap();
+        database.save_pending_transcript(id, "one two").unwrap();
+        database.save_pending_final(id, "one two").unwrap();
+        database.save_pending_to_history(id, "30 days").unwrap();
         let two_days_ago = Database::now() - 2 * 86_400;
         database
             .conn()

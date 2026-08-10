@@ -15,7 +15,6 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const addButtonRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useDialogFocus(addOpen, addButtonRef);
 
   const load = () =>
     api.dictionary().then(setEntries).catch((error) =>
@@ -26,20 +25,6 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     void load();
   }, []);
 
-  useEffect(() => {
-    if (!addOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !adding) {
-        setAddOpen(false);
-        setValue("");
-        setCorrection("");
-        setCorrectingMisspelling(false);
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [addOpen, adding]);
-
   const closeAddDialog = () => {
     if (adding) return;
     setAddOpen(false);
@@ -47,6 +32,7 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
     setCorrection("");
     setCorrectingMisspelling(false);
   };
+  const dialogRef = useDialogFocus(addOpen, addButtonRef, closeAddDialog);
 
   const add = async (event: FormEvent) => {
     event.preventDefault();

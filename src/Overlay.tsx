@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import * as Progress from "@radix-ui/react-progress";
 
 type Phase = "starting" | "recording" | "analysing" | "thinking" | "error";
 
@@ -164,16 +163,19 @@ export default function Overlay() {
           <span className="shimmer-label" data-label={processingLabel}>
             {processingLabel}
           </span>
-          <Progress.Root
+          <div
             className="processing-progress"
-            value={progress}
+            role="progressbar"
             aria-label="Preparing transcription"
+            aria-valuenow={progress}
+            aria-valuemin={0}
+            aria-valuemax={100}
           >
-            <Progress.Indicator
+            <div
               className="processing-progress__fill"
               style={{ transform: `translateX(-${100 - progress}%)` }}
             />
-          </Progress.Root>
+          </div>
         </div>
       )}
     </div>

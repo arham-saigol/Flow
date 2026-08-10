@@ -22,7 +22,6 @@ function SnippetRow({
   const [trigger, setTrigger] = useState(snippet.trigger);
   const [content, setContent] = useState(snippet.content);
   const editButtonRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useDialogFocus(editing, editButtonRef);
 
   const close = () => {
     if (saving) return;
@@ -30,15 +29,7 @@ function SnippetRow({
     setContent(snippet.content);
     setEditing(false);
   };
-
-  useEffect(() => {
-    if (!editing) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [editing, saving, snippet]);
+  const dialogRef = useDialogFocus(editing, editButtonRef, close);
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -137,24 +128,10 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
   const [addOpen, setAddOpen] = useState(false);
   const [adding, setAdding] = useState(false);
   const addButtonRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useDialogFocus(addOpen, addButtonRef);
 
   useEffect(() => {
     api.snippets().then(setSnippets).catch((error) => notify({ kind: "error", message: String(error) }));
   }, [notify]);
-
-  useEffect(() => {
-    if (!addOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !adding) {
-        setAddOpen(false);
-        setTrigger("");
-        setContent("");
-      }
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [addOpen, adding]);
 
   const closeAddDialog = () => {
     if (adding) return;
@@ -162,6 +139,7 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
     setTrigger("");
     setContent("");
   };
+  const dialogRef = useDialogFocus(addOpen, addButtonRef, closeAddDialog);
 
   const add = async (event: FormEvent) => {
     event.preventDefault();

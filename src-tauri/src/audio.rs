@@ -84,7 +84,6 @@ impl Drop for ActiveRecording {
 
 pub struct AudioRecorder {
     sender: mpsc::Sender<RecorderCommand>,
-    recording: Arc<AtomicBool>,
 }
 
 enum RecorderCommand {
@@ -112,18 +111,13 @@ enum RecorderCommand {
 impl AudioRecorder {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let recording = Arc::new(AtomicBool::new(false));
-        let worker_recording = recording.clone();
+        let worker_recording = Arc::new(AtomicBool::new(false));
         let error_sender = sender.clone();
         std::thread::Builder::new()
             .name("flow-audio".into())
             .spawn(move || recorder_worker(receiver, worker_recording, error_sender))
             .expect("could not start Flow audio worker");
-        Self { sender, recording }
-    }
-
-    pub fn is_recording(&self) -> bool {
-        self.recording.load(Ordering::Acquire)
+        Self { sender }
     }
 
     pub fn start(&self, app: AppHandle, microphone_id: &str, target: TargetWindow) -> Result<()> {

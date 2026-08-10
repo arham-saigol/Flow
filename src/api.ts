@@ -40,9 +40,6 @@ export const api = {
   microphones: () => invokeCommand<Microphone[]>("list_microphones"),
   copyText: (text: string) => invokeCommand<void>("copy_text", { text }),
   testApiKey: (apiKey: string) => invokeCommand<void>("test_api_key", { apiKey }),
-  startRecording: () => invokeCommand<void>("start_recording"),
-  stopRecording: () => invokeCommand<void>("stop_recording"),
-  cancelRecording: () => invokeCommand<void>("cancel_recording"),
   retryPendingDictation: (id: number) =>
     invokeCommand<void>("retry_pending_dictation", { id }),
   deletePendingDictation: (id: number) =>

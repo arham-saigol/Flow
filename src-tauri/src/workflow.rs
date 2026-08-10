@@ -162,10 +162,6 @@ pub async fn toggle(app: &AppHandle) {
     toggle_with_target(app, platform::remembered_target()).await;
 }
 
-pub async fn toggle_from_tray(app: &AppHandle) {
-    toggle_with_target(app, platform::remembered_target()).await;
-}
-
 async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
     let state = app.state::<AppState>();
     let result = match state.workflow.hotkey_press() {

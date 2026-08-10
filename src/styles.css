@@ -182,10 +182,6 @@ kbd {
   border-radius: 12px;
   overflow: hidden;
 }
-.section-heading { display: flex; align-items: center; justify-content: space-between; padding: 21px 23px 18px; border-bottom: 1px solid var(--border-soft); }
-.section-heading h2 { margin: 0 0 4px; font: 700 17px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; letter-spacing: -.35px; }
-.section-heading p { margin: 0; color: var(--muted); font-size: 12px; }
-.count-pill { min-width: 25px; height: 25px; padding: 0 7px; display: grid; place-items: center; color: var(--muted); background: var(--panel-strong); border-radius: 20px; font-size: 11px; font-weight: 600; }
 .empty-state { min-height: 230px; padding: 40px 25px; display: flex; align-items: center; flex-direction: column; justify-content: center; text-align: center; }
 .empty-state__icon { width: 42px; height: 42px; display: grid; place-items: center; color: #857c70; background: #f0ebe4; border: 1px solid #e4ddd3; border-radius: 12px; margin-bottom: 14px; }
 .empty-state h3 { margin: 0 0 6px; font: 600 14px/1.2 "Segoe UI Variable Display", "Segoe UI", sans-serif; }
@@ -242,7 +238,6 @@ textarea { resize: vertical; line-height: 1.5; }
 .secondary-button { background: var(--panel); border: 1px solid var(--border); }
 .secondary-button:hover { background: #f3efe8; }
 .secondary-button.compact { height: 34px; padding: 0 11px; align-self: flex-start; font-size: 13px; }
-.helper-copy { margin: 12px 3px 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .flat-list { margin-top: 21px; }
 .dictionary-list { margin-top: 0; }
 .flat-row { min-height: 53px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 10px 7px 17px; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
