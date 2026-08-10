@@ -17,7 +17,7 @@ use models::{DashboardData, DictionaryEntry, Microphone, SettingsData, Snippet};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, State, WindowEvent,
+    AppHandle, Manager, State, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 
@@ -284,6 +284,12 @@ pub fn run() {
 
             create_tray(app, &settings.keybind)?;
             platform::install_keyboard_hook(app.handle().clone())?;
+
+            // Configured windows otherwise start loading before setup has
+            // managed AppState, allowing eager frontend commands to race it.
+            for config in app.config().app.windows.clone() {
+                WebviewWindowBuilder::from_config(app.handle(), &config)?.build()?;
+            }
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();

@@ -553,7 +553,7 @@ fn clipboard_unchanged(expected: ClipboardToken, current: ClipboardToken) -> boo
 }
 
 struct TemporaryClipboard {
-    original: Option<Vec<ClipboardItem>>,
+    original: Vec<ClipboardItem>,
     token: ClipboardToken,
 }
 
@@ -575,65 +575,63 @@ unsafe fn prepare_temporary_clipboard(text: &str) -> Result<TemporaryClipboard> 
     let allocation = allocate_clipboard_wide(&wide)?;
     let Some(rendered_owner) = render_delayed_clipboard_with_timeout(owner) else {
         let _ = GlobalFree(allocation);
-        return replace_clipboard_without_backup(text);
+        return Err(FlowError::Windows(
+            "Flow could not safely preserve the clipboard, so the dictation was not pasted.".into(),
+        ));
     };
-    if open_clipboard_with_retry(owner, "Could not preserve the clipboard").is_err() {
+    if let Err(error) = open_clipboard_with_retry(owner, "Could not preserve the clipboard") {
         let _ = GlobalFree(allocation);
-        return replace_clipboard_without_backup(text);
+        return Err(error);
     }
     let captured_owner = GetClipboardOwner().map_or(0, |owner| owner.0 as isize);
     if captured_owner != rendered_owner {
         let _ = CloseClipboard();
         let _ = GlobalFree(allocation);
-        return replace_clipboard_without_backup(text);
+        return Err(FlowError::Windows(
+            "The clipboard changed while Flow was preserving it, so the dictation was not pasted."
+                .into(),
+        ));
     }
     let original = match capture_open_clipboard() {
         Some(original) => original,
         None => {
             let _ = CloseClipboard();
             let _ = GlobalFree(allocation);
-            return replace_clipboard_without_backup(text);
+            return Err(FlowError::Windows(
+                "Flow could not safely preserve the clipboard, so the dictation was not pasted."
+                    .into(),
+            ));
         }
     };
-    if EmptyClipboard().is_err() {
+    if let Err(error) = EmptyClipboard() {
         let _ = CloseClipboard();
         let _ = GlobalFree(allocation);
-        return replace_clipboard_without_backup(text);
+        return Err(FlowError::Windows(format!(
+            "Could not temporarily clear the clipboard: {error}"
+        )));
     }
     if let Err(replace_error) = set_clipboard_wide(allocation) {
-        let token = current_clipboard_token();
+        // Closing the clipboard can finalize synthesized formats and advance
+        // its sequence number. Capture the restore token only after closing.
         let _ = CloseClipboard();
+        let token = current_clipboard_token();
         restore_clipboard(&original, token).map_err(|restore_error| {
             FlowError::Windows(format!(
                 "{replace_error} The previous clipboard also could not be restored: {restore_error}"
             ))
         })?;
-        return replace_clipboard_without_backup(text);
+        return Err(replace_error);
     }
-    let token = current_clipboard_token();
+    // Windows can advance the sequence number when CloseClipboard finalizes a
+    // write. A token captured before this point would make every restore look
+    // like a competing clipboard update and leave the dictation text behind.
     let _ = CloseClipboard();
-    Ok(TemporaryClipboard {
-        original: Some(original),
-        token,
-    })
-}
-
-unsafe fn replace_clipboard_without_backup(text: &str) -> Result<TemporaryClipboard> {
-    // A clipboard can contain owner-managed or oversized formats that cannot
-    // be duplicated safely. Text delivery still uses one atomic clipboard
-    // paste; in this rare case the dictation remains on the clipboard.
-    write_clipboard_text(text)?;
-    Ok(TemporaryClipboard {
-        original: None,
-        token: current_clipboard_token(),
-    })
+    let token = current_clipboard_token();
+    Ok(TemporaryClipboard { original, token })
 }
 
 unsafe fn restore_temporary_clipboard(temporary: &TemporaryClipboard) -> Result<()> {
-    match temporary.original.as_ref() {
-        Some(original) => restore_clipboard(original, temporary.token),
-        None => Ok(()),
-    }
+    restore_clipboard(&temporary.original, temporary.token)
 }
 
 unsafe fn render_delayed_clipboard_with_timeout(flow_owner: HWND) -> Option<isize> {

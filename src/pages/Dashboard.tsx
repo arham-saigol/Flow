@@ -78,7 +78,7 @@ export function Dashboard({
   ];
 
   return (
-    <section className="page">
+    <section className="page page--narrow">
       <header className="page-header">
         <div>
           <h1>Dictation</h1>
