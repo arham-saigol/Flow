@@ -10,7 +10,8 @@ that is active when recording ends.
 - Windows 10 or 11 with WebView2
 - Node.js 20 or newer
 - Stable Rust with the MSVC toolchain
-- A Groq API key
+- A Groq API key for writing cleanup and optional Whisper transcription
+- A Deepgram API key when using Nova-3 transcription
 
 ## Development
 
@@ -19,9 +20,11 @@ npm install
 npm run tauri dev
 ```
 
-The Groq API key is entered in Flow's Settings and stored as a generic credential
-in Windows Credential Manager. Local history, dictionary entries, snippets, and
-preferences are stored in Flow's application-data directory.
+Groq and Deepgram API keys are entered in Flow's Settings and stored as generic
+credentials in Windows Credential Manager. Settings also let you choose between
+Deepgram Nova-3 and Groq Whisper Large V3 for speech-to-text; writing cleanup
+continues to use Groq. Local history, dictionary entries, snippets, and preferences
+are stored in Flow's application-data directory.
 
 ## Validation and release
 

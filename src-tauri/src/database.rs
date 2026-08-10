@@ -157,10 +157,20 @@ impl Database {
         Ok(())
     }
 
-    pub fn settings(&self, has_api_key: bool) -> Result<SettingsData> {
+    pub fn settings(
+        &self,
+        has_groq_api_key: bool,
+        has_deepgram_api_key: bool,
+    ) -> Result<SettingsData> {
         let defaults = SettingsData::default();
         Ok(SettingsData {
-            has_api_key,
+            has_groq_api_key,
+            has_deepgram_api_key,
+            transcription_model: self
+                .setting("transcription_model")?
+                .as_deref()
+                .and_then(crate::models::TranscriptionModel::from_setting)
+                .unwrap_or(defaults.transcription_model),
             microphone_id: self
                 .setting("microphone_id")?
                 .unwrap_or(defaults.microphone_id),
@@ -183,6 +193,11 @@ impl Database {
         let transaction = conn.transaction()?;
         Self::put_setting(&transaction, "microphone_id", &settings.microphone_id)?;
         Self::put_setting(&transaction, "microphone_name", &settings.microphone_name)?;
+        Self::put_setting(
+            &transaction,
+            "transcription_model",
+            settings.transcription_model.as_str(),
+        )?;
         Self::put_setting(&transaction, "keybind", &settings.keybind)?;
         Self::put_setting(
             &transaction,
@@ -643,7 +658,7 @@ mod tests {
 
     use rusqlite::Connection;
 
-    use crate::models::SettingsData;
+    use crate::models::{SettingsData, TranscriptionModel};
 
     use super::Database;
 
@@ -785,6 +800,25 @@ mod tests {
         assert_eq!(
             missing.to_string(),
             "That recoverable dictation no longer exists."
+        );
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn transcription_model_round_trips_through_settings() {
+        let path = database_path("transcription-model");
+        let database = Database::open(&path).unwrap();
+        let settings = SettingsData {
+            transcription_model: TranscriptionModel::GroqWhisperLargeV3,
+            ..SettingsData::default()
+        };
+
+        database.save_settings(&settings).unwrap();
+
+        assert_eq!(
+            database.settings(true, true).unwrap().transcription_model,
+            TranscriptionModel::GroqWhisperLargeV3
         );
         drop(database);
         let _ = std::fs::remove_file(path);

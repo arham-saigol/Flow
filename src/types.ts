@@ -40,8 +40,14 @@ export interface PendingDictation {
   created_at: number;
 }
 
+export type TranscriptionModel =
+  | "groq-whisper-large-v3"
+  | "deepgram-nova-3";
+
 export interface SettingsData {
-  has_api_key: boolean;
+  has_groq_api_key: boolean;
+  has_deepgram_api_key: boolean;
+  transcription_model: TranscriptionModel;
   microphone_id: string;
   microphone_name: string;
   keybind: string;

@@ -45,9 +45,36 @@ pub struct DashboardData {
     pub pending: Vec<PendingDictation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranscriptionModel {
+    #[serde(rename = "groq-whisper-large-v3")]
+    GroqWhisperLargeV3,
+    #[serde(rename = "deepgram-nova-3")]
+    DeepgramNova3,
+}
+
+impl TranscriptionModel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GroqWhisperLargeV3 => "groq-whisper-large-v3",
+            Self::DeepgramNova3 => "deepgram-nova-3",
+        }
+    }
+
+    pub fn from_setting(value: &str) -> Option<Self> {
+        match value {
+            "groq-whisper-large-v3" => Some(Self::GroqWhisperLargeV3),
+            "deepgram-nova-3" => Some(Self::DeepgramNova3),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SettingsData {
-    pub has_api_key: bool,
+    pub has_groq_api_key: bool,
+    pub has_deepgram_api_key: bool,
+    pub transcription_model: TranscriptionModel,
     pub microphone_id: String,
     pub microphone_name: String,
     pub keybind: String,
@@ -58,7 +85,9 @@ pub struct SettingsData {
 impl Default for SettingsData {
     fn default() -> Self {
         Self {
-            has_api_key: false,
+            has_groq_api_key: false,
+            has_deepgram_api_key: false,
+            transcription_model: TranscriptionModel::DeepgramNova3,
             microphone_id: String::new(),
             microphone_name: "System default".into(),
             keybind: "Right Alt".into(),
@@ -90,4 +119,17 @@ pub struct WaveformPayload {
 #[derive(Clone, Serialize)]
 pub struct MessagePayload {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TranscriptionModel;
+
+    #[test]
+    fn deepgram_model_uses_the_frontend_wire_value() {
+        assert_eq!(
+            serde_json::from_str::<TranscriptionModel>(r#""deepgram-nova-3""#).unwrap(),
+            TranscriptionModel::DeepgramNova3
+        );
+    }
 }

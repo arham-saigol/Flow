@@ -93,7 +93,6 @@ impl GroqClient {
             .map_err(|error| {
                 FlowError::Message(format!("Could not prepare the recording: {error}"))
             })?;
-        // Omitting the language field lets Whisper detect the spoken language.
         let form = multipart::Form::new()
             .part("file", file)
             .text("model", "whisper-large-v3")
@@ -103,7 +102,7 @@ impl GroqClient {
         let response = self
             .client
             .post(format!("{API_BASE}/audio/transcriptions"))
-            .bearer_auth(api_key)
+            .bearer_auth(api_key.trim())
             .multipart(form)
             .send()
             .await?;

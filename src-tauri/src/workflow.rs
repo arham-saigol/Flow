@@ -10,7 +10,7 @@ use unicode_categories::UnicodeCategories;
 use crate::{
     credentials,
     error::{FlowError, Result},
-    models::{DictionaryEntry, MessagePayload, OverlayPayload},
+    models::{DictionaryEntry, MessagePayload, OverlayPayload, TranscriptionModel},
     platform, AppState,
 };
 
@@ -188,10 +188,19 @@ fn start_reserved(app: &AppHandle, target: Option<platform::TargetWindow>) -> Re
     ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
     cancel_error_dismiss();
     let result = (|| {
-        if !credentials::has_api_key() {
-            return Err(FlowError::MissingApiKey);
+        let has_groq_api_key = credentials::has_groq_api_key();
+        let has_deepgram_api_key = credentials::has_deepgram_api_key();
+        let settings = state
+            .database
+            .settings(has_groq_api_key, has_deepgram_api_key)?;
+        if !has_groq_api_key {
+            return Err(FlowError::MissingGroqApiKey);
         }
-        let settings = state.database.settings(true)?;
+        if settings.transcription_model == TranscriptionModel::DeepgramNova3
+            && !has_deepgram_api_key
+        {
+            return Err(FlowError::MissingDeepgramApiKey);
+        }
         let target = target.unwrap_or_else(platform::capture_target);
         platform::prepare_overlay(app, target)?;
         emit_overlay(app, "starting", Some("Starting"));
@@ -312,20 +321,31 @@ async fn run_pending(
     emit_overlay(app, "analysing", Some("Analyzing"));
     let result = async {
         let pending = state.database.pending_dictation(pending_id)?;
-        let settings = state.database.settings(true)?;
+        let settings = state.database.settings(true, true)?;
         let transcript = if let Some(transcript) = pending.raw_text.clone() {
             transcript
         } else {
-            let api_key = credentials::read_api_key()?;
             let dictionary = state.database.dictionary()?;
             let (preferred_spellings, _) = dictionary_guidance(&dictionary);
             let wav = pending.wav.ok_or_else(|| {
                 FlowError::Message("The recoverable recording is incomplete.".into())
             })?;
-            let transcript = state
-                .groq
-                .transcribe(&api_key, wav, &preferred_spellings)
-                .await?;
+            let transcript = match settings.transcription_model {
+                TranscriptionModel::GroqWhisperLargeV3 => {
+                    let api_key = credentials::read_groq_api_key()?;
+                    state
+                        .groq
+                        .transcribe(&api_key, wav, &preferred_spellings)
+                        .await?
+                }
+                TranscriptionModel::DeepgramNova3 => {
+                    let api_key = credentials::read_deepgram_api_key()?;
+                    state
+                        .deepgram
+                        .transcribe(&api_key, wav, &preferred_spellings)
+                        .await?
+                }
+            };
             state
                 .database
                 .save_pending_transcript(pending_id, &transcript)?;
@@ -335,7 +355,7 @@ async fn run_pending(
         let final_text = if let Some(final_text) = pending.final_text {
             final_text
         } else {
-            let api_key = credentials::read_api_key()?;
+            let api_key = credentials::read_groq_api_key()?;
             let dictionary = state.database.dictionary()?;
             let (_, corrections) = dictionary_guidance(&dictionary);
             let normalized = normalize_with_corrections(&transcript, &corrections);
@@ -642,7 +662,7 @@ fn friendly_error(error: FlowError) -> String {
 fn friendly_error_ref(error: &FlowError) -> String {
     match error {
         FlowError::Network(_) => {
-            "Flow couldn’t reach Groq. Check your connection and try again.".into()
+            "Flow couldn’t reach an external service. Check your connection and try again.".into()
         }
         FlowError::Windows(message) => message.clone(),
         other => other.to_string(),

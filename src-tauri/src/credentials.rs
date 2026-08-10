@@ -8,20 +8,29 @@ use windows::{
 
 use crate::error::{FlowError, Result};
 
-const TARGET: &str = "Flow/GroqApiKey";
+const GROQ_TARGET: &str = "Flow/GroqApiKey";
+const DEEPGRAM_TARGET: &str = "Flow/DeepgramApiKey";
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn has_api_key() -> bool {
-    read_api_key()
+fn missing_api_key(provider: &str) -> FlowError {
+    if provider == "Deepgram" {
+        FlowError::MissingDeepgramApiKey
+    } else {
+        FlowError::MissingGroqApiKey
+    }
+}
+
+fn has_api_key(target: &str, provider: &str) -> bool {
+    read_api_key(target, provider)
         .map(|value| !value.is_empty())
         .unwrap_or(false)
 }
 
-pub fn read_api_key() -> Result<String> {
-    let target = wide(TARGET);
+fn read_api_key(target: &str, provider: &str) -> Result<String> {
+    let target = wide(target);
     let mut credential = std::ptr::null_mut();
     unsafe {
         CredReadW(
@@ -30,28 +39,28 @@ pub fn read_api_key() -> Result<String> {
             0,
             &mut credential,
         )
-        .map_err(|_| FlowError::MissingApiKey)?;
+        .map_err(|_| missing_api_key(provider))?;
         if credential.is_null() {
-            return Err(FlowError::MissingApiKey);
+            return Err(missing_api_key(provider));
         }
         let record = &*credential;
         let bytes =
             std::slice::from_raw_parts(record.CredentialBlob, record.CredentialBlobSize as usize);
         let result = String::from_utf8(bytes.to_vec())
-            .map_err(|_| FlowError::Message("The saved Groq API key is invalid.".into()));
+            .map_err(|_| FlowError::Message(format!("The saved {provider} API key is invalid.")));
         CredFree(credential.cast());
         result
     }
 }
 
-pub fn save_api_key(api_key: &str) -> Result<()> {
+fn save_api_key(target: &str, api_key: &str, provider: &str) -> Result<()> {
     let key = api_key.trim();
     if key.is_empty() {
-        return Err(FlowError::Message(
-            "The Groq API key cannot be empty.".into(),
-        ));
+        return Err(FlowError::Message(format!(
+            "The {provider} API key cannot be empty."
+        )));
     }
-    let mut target = wide(TARGET);
+    let mut target = wide(target);
     let mut username = wide("Flow");
     let mut blob = key.as_bytes().to_vec();
     let credential = CREDENTIALW {
@@ -70,11 +79,43 @@ pub fn save_api_key(api_key: &str) -> Result<()> {
     }
 }
 
-pub fn delete_api_key() -> Result<()> {
-    let target = wide(TARGET);
+fn delete_api_key(target: &str) -> Result<()> {
+    let target = wide(target);
     unsafe {
         CredDeleteW(PCWSTR(target.as_ptr()), CRED_TYPE_GENERIC, 0).map_err(|error| {
             FlowError::Windows(format!("Could not restore the saved API key: {error}"))
         })
     }
+}
+
+pub fn has_groq_api_key() -> bool {
+    has_api_key(GROQ_TARGET, "Groq")
+}
+
+pub fn read_groq_api_key() -> Result<String> {
+    read_api_key(GROQ_TARGET, "Groq")
+}
+
+pub fn save_groq_api_key(api_key: &str) -> Result<()> {
+    save_api_key(GROQ_TARGET, api_key, "Groq")
+}
+
+pub fn delete_groq_api_key() -> Result<()> {
+    delete_api_key(GROQ_TARGET)
+}
+
+pub fn has_deepgram_api_key() -> bool {
+    has_api_key(DEEPGRAM_TARGET, "Deepgram")
+}
+
+pub fn read_deepgram_api_key() -> Result<String> {
+    read_api_key(DEEPGRAM_TARGET, "Deepgram")
+}
+
+pub fn save_deepgram_api_key(api_key: &str) -> Result<()> {
+    save_api_key(DEEPGRAM_TARGET, api_key, "Deepgram")
+}
+
+pub fn delete_deepgram_api_key() -> Result<()> {
+    delete_api_key(DEEPGRAM_TARGET)
 }

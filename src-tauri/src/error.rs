@@ -13,7 +13,9 @@ pub enum FlowError {
     #[error("Windows error: {0}")]
     Windows(String),
     #[error("No Groq API key is saved. Open Settings to add one.")]
-    MissingApiKey,
+    MissingGroqApiKey,
+    #[error("No Deepgram API key is saved. Open Settings to add one.")]
+    MissingDeepgramApiKey,
     #[error("Flow is already recording.")]
     AlreadyRecording,
     #[error("There is no active recording.")]

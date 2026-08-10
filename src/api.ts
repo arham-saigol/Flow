@@ -35,11 +35,22 @@ export const api = {
     invokeCommand<void>("update_snippet", { id, trigger, content }),
   deleteSnippet: (id: number) => invokeCommand<void>("delete_snippet", { id }),
   settings: () => invokeCommand<SettingsData>("get_settings"),
-  saveSettings: (settings: SettingsData, apiKey?: string) =>
-    invokeCommand<void>("save_settings", { settings, apiKey: apiKey || null }),
+  saveSettings: (
+    settings: SettingsData,
+    groqApiKey?: string,
+    deepgramApiKey?: string,
+  ) =>
+    invokeCommand<void>("save_settings", {
+      settings,
+      groqApiKey: groqApiKey || null,
+      deepgramApiKey: deepgramApiKey || null,
+    }),
   microphones: () => invokeCommand<Microphone[]>("list_microphones"),
   copyText: (text: string) => invokeCommand<void>("copy_text", { text }),
-  testApiKey: (apiKey: string) => invokeCommand<void>("test_api_key", { apiKey }),
+  testGroqApiKey: (apiKey: string) =>
+    invokeCommand<void>("test_groq_api_key", { apiKey }),
+  testDeepgramApiKey: (apiKey: string) =>
+    invokeCommand<void>("test_deepgram_api_key", { apiKey }),
   retryPendingDictation: (id: number) =>
     invokeCommand<void>("retry_pending_dictation", { id }),
   deletePendingDictation: (id: number) =>

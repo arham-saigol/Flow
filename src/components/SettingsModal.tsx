@@ -15,7 +15,9 @@ import type { Microphone, SettingsData } from "../types";
 import type { ToastData } from "./Toast";
 
 const defaults: SettingsData = {
-  has_api_key: false,
+  has_groq_api_key: false,
+  has_deepgram_api_key: false,
+  transcription_model: "deepgram-nova-3",
   microphone_id: "",
   microphone_name: "System default",
   keybind: "Right Alt",
@@ -47,10 +49,13 @@ export function SettingsModal({
 }) {
   const [settings, setSettings] = useState(defaults);
   const [microphones, setMicrophones] = useState<Microphone[]>([]);
-  const [apiKey, setApiKey] = useState("");
-  const [showKey, setShowKey] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [tested, setTested] = useState(false);
+  const [groqApiKey, setGroqApiKey] = useState("");
+  const [deepgramApiKey, setDeepgramApiKey] = useState("");
+  const [showGroqKey, setShowGroqKey] = useState(false);
+  const [showDeepgramKey, setShowDeepgramKey] = useState(false);
+  const [testing, setTesting] = useState<"groq" | "deepgram" | null>(null);
+  const [groqTested, setGroqTested] = useState(false);
+  const [deepgramTested, setDeepgramTested] = useState(false);
   const [saving, setSaving] = useState(false);
   const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [activeTab, setActiveTab] = useState<"general" | "transcription">("general");
@@ -80,18 +85,28 @@ export function SettingsModal({
       .catch((error) => notify({ kind: "error", message: String(error) }));
   }, [notify]);
 
-  const test = async () => {
-    if (!apiKey) return;
-    setTesting(true);
+  const test = async (provider: "groq" | "deepgram") => {
+    const key = provider === "groq" ? groqApiKey : deepgramApiKey;
+    if (!key) return;
+    setTesting(provider);
     try {
-      await api.testApiKey(apiKey);
-      setTested(true);
-      notify({ kind: "success", message: "Groq API key connected" });
+      if (provider === "groq") {
+        await api.testGroqApiKey(key);
+        setGroqTested(true);
+      } else {
+        await api.testDeepgramApiKey(key);
+        setDeepgramTested(true);
+      }
+      notify({
+        kind: "success",
+        message: `${provider === "groq" ? "Groq" : "Deepgram"} API key connected`,
+      });
     } catch (error) {
-      setTested(false);
+      if (provider === "groq") setGroqTested(false);
+      else setDeepgramTested(false);
       notify({ kind: "error", message: String(error) });
     } finally {
-      setTesting(false);
+      setTesting(null);
     }
   };
 
@@ -107,7 +122,8 @@ export function SettingsModal({
             ? selected?.name ?? settings.microphone_name
             : "System default",
         },
-        apiKey || undefined,
+        groqApiKey || undefined,
+        deepgramApiKey || undefined,
       );
       notify({ kind: "success", message: "Settings saved" });
       onSaved(settings.keybind);
@@ -263,32 +279,70 @@ export function SettingsModal({
               <>
                 <div className="settings-pane__heading">
                   <h3>Transcription</h3>
-                  <p>Connect the service Flow uses for transcription and writing cleanup.</p>
+                  <p>Choose an STT model. Groq continues to polish every transcription.</p>
                 </div>
 
                 <div className="settings-transcription">
+                  <label className="field">
+                    <span>Speech-to-text model</span>
+                    <select
+                      value={settings.transcription_model}
+                      onChange={(event) => setSettings({
+                        ...settings,
+                        transcription_model: event.target.value as SettingsData["transcription_model"],
+                      })}
+                    >
+                      <option value="deepgram-nova-3">Deepgram Nova-3</option>
+                      <option value="groq-whisper-large-v3">Groq Whisper Large V3</option>
+                    </select>
+                  </label>
+
                   <label className="field">
                     <span>Groq API key</span>
                     <div className="secret-field">
                       <KeyRound size={16} />
                       <input
-                        type={showKey ? "text" : "password"}
-                        value={apiKey}
+                        type={showGroqKey ? "text" : "password"}
+                        value={groqApiKey}
                         autoComplete="off"
-                        placeholder={settings.has_api_key ? "Saved securely ••••••••" : "gsk_…"}
-                        onChange={(e) => {
-                          setApiKey(e.target.value);
-                          setTested(false);
+                        placeholder={settings.has_groq_api_key ? "Saved securely ••••••••" : "gsk_…"}
+                        onChange={(event) => {
+                          setGroqApiKey(event.target.value);
+                          setGroqTested(false);
                         }}
                       />
-                      <button type="button" aria-label={showKey ? "Hide API key" : "Show API key"} onClick={() => setShowKey((value) => !value)}>
-                        {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      <button type="button" aria-label={showGroqKey ? "Hide Groq API key" : "Show Groq API key"} onClick={() => setShowGroqKey((value) => !value)}>
+                        {showGroqKey ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
                   </label>
-                  <button className="secondary-button compact" disabled={!apiKey || testing} onClick={() => void test()}>
-                    {testing ? <LoaderCircle className="spin" size={15} /> : tested ? <Check size={15} /> : null}
-                    {testing ? "Checking…" : tested ? "Connected" : "Test connection"}
+                  <button className="secondary-button compact" disabled={!groqApiKey || testing !== null} onClick={() => void test("groq")}>
+                    {testing === "groq" ? <LoaderCircle className="spin" size={15} /> : groqTested ? <Check size={15} /> : null}
+                    {testing === "groq" ? "Checking…" : groqTested ? "Connected" : "Test Groq connection"}
+                  </button>
+
+                  <label className="field">
+                    <span>Deepgram API key</span>
+                    <div className="secret-field">
+                      <KeyRound size={16} />
+                      <input
+                        type={showDeepgramKey ? "text" : "password"}
+                        value={deepgramApiKey}
+                        autoComplete="off"
+                        placeholder={settings.has_deepgram_api_key ? "Saved securely ••••••••" : "Deepgram API key"}
+                        onChange={(event) => {
+                          setDeepgramApiKey(event.target.value);
+                          setDeepgramTested(false);
+                        }}
+                      />
+                      <button type="button" aria-label={showDeepgramKey ? "Hide Deepgram API key" : "Show Deepgram API key"} onClick={() => setShowDeepgramKey((value) => !value)}>
+                        {showDeepgramKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      </button>
+                    </div>
+                  </label>
+                  <button className="secondary-button compact" disabled={!deepgramApiKey || testing !== null} onClick={() => void test("deepgram")}>
+                    {testing === "deepgram" ? <LoaderCircle className="spin" size={15} /> : deepgramTested ? <Check size={15} /> : null}
+                    {testing === "deepgram" ? "Checking…" : deepgramTested ? "Connected" : "Test Deepgram connection"}
                   </button>
                 </div>
               </>

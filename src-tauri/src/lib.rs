@@ -1,6 +1,7 @@
 mod audio;
 mod credentials;
 mod database;
+mod deepgram;
 mod error;
 mod groq;
 mod models;
@@ -11,6 +12,7 @@ use std::sync::atomic::AtomicBool;
 
 use audio::AudioRecorder;
 use database::Database;
+use deepgram::DeepgramClient;
 use error::{FlowError, Result};
 use groq::GroqClient;
 use models::{DashboardData, DictionaryEntry, Microphone, SettingsData, Snippet};
@@ -26,6 +28,7 @@ const TRAY_ID: &str = "flow-tray";
 pub struct AppState {
     pub database: Database,
     pub recorder: AudioRecorder,
+    pub deepgram: DeepgramClient,
     pub groq: GroqClient,
     pub workflow: workflow::WorkflowState,
     pub capture_limit_processing: AtomicBool,
@@ -94,7 +97,10 @@ fn delete_snippet(state: State<'_, AppState>, id: i64) -> Result<()> {
 
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<SettingsData> {
-    state.database.settings(credentials::has_api_key())
+    state.database.settings(
+        credentials::has_groq_api_key(),
+        credentials::has_deepgram_api_key(),
+    )
 }
 
 #[tauri::command]
@@ -102,9 +108,13 @@ fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: SettingsData,
-    api_key: Option<String>,
+    groq_api_key: Option<String>,
+    deepgram_api_key: Option<String>,
 ) -> Result<()> {
-    let previous = state.database.settings(credentials::has_api_key())?;
+    let previous = state.database.settings(
+        credentials::has_groq_api_key(),
+        credentials::has_deepgram_api_key(),
+    )?;
     let autostart = app.autolaunch();
     if previous.launch_at_startup != settings.launch_at_startup {
         set_autostart(&autostart, settings.launch_at_startup)?;
@@ -119,34 +129,69 @@ fn save_settings(
             "Could not update the system tray: {error}"
         )));
     }
-    let api_key = api_key.filter(|key| !key.trim().is_empty());
-    let previous_api_key = api_key
+    let groq_api_key = groq_api_key.filter(|key| !key.trim().is_empty());
+    let deepgram_api_key = deepgram_api_key.filter(|key| !key.trim().is_empty());
+    let previous_groq_key = groq_api_key
         .as_ref()
-        .and_then(|_| credentials::read_api_key().ok());
-    if let Some(api_key) = api_key.as_ref() {
-        if let Err(error) = credentials::save_api_key(api_key) {
+        .and_then(|_| credentials::read_groq_api_key().ok());
+    let previous_deepgram_key = deepgram_api_key
+        .as_ref()
+        .and_then(|_| credentials::read_deepgram_api_key().ok());
+    if let Some(api_key) = groq_api_key.as_ref() {
+        if let Err(error) = credentials::save_groq_api_key(api_key) {
+            let _ = set_autostart(&autostart, previous.launch_at_startup);
+            let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
+            return Err(error);
+        }
+    }
+    if let Some(api_key) = deepgram_api_key.as_ref() {
+        if let Err(error) = credentials::save_deepgram_api_key(api_key) {
+            restore_api_key(
+                groq_api_key.is_some(),
+                previous_groq_key.as_deref(),
+                credentials::save_groq_api_key,
+                credentials::delete_groq_api_key,
+            );
             let _ = set_autostart(&autostart, previous.launch_at_startup);
             let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
             return Err(error);
         }
     }
     if let Err(error) = state.database.save_settings(&settings) {
-        if api_key.is_some() {
-            match previous_api_key {
-                Some(previous_key) => {
-                    let _ = credentials::save_api_key(&previous_key);
-                }
-                None => {
-                    let _ = credentials::delete_api_key();
-                }
-            }
-        }
+        restore_api_key(
+            groq_api_key.is_some(),
+            previous_groq_key.as_deref(),
+            credentials::save_groq_api_key,
+            credentials::delete_groq_api_key,
+        );
+        restore_api_key(
+            deepgram_api_key.is_some(),
+            previous_deepgram_key.as_deref(),
+            credentials::save_deepgram_api_key,
+            credentials::delete_deepgram_api_key,
+        );
         let _ = set_autostart(&autostart, previous.launch_at_startup);
         let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
         return Err(error);
     }
     platform::configure_keybind(&settings.keybind);
     Ok(())
+}
+
+fn restore_api_key(
+    changed: bool,
+    previous: Option<&str>,
+    save: fn(&str) -> Result<()>,
+    delete: fn() -> Result<()>,
+) {
+    if !changed {
+        return;
+    }
+    if let Some(previous) = previous {
+        let _ = save(previous);
+    } else {
+        let _ = delete();
+    }
 }
 
 fn set_autostart(
@@ -170,8 +215,13 @@ fn list_microphones() -> Result<Vec<Microphone>> {
 }
 
 #[tauri::command]
-async fn test_api_key(state: State<'_, AppState>, api_key: String) -> Result<()> {
+async fn test_groq_api_key(state: State<'_, AppState>, api_key: String) -> Result<()> {
     state.groq.test_key(&api_key).await
+}
+
+#[tauri::command]
+async fn test_deepgram_api_key(state: State<'_, AppState>, api_key: String) -> Result<()> {
+    state.deepgram.test_key(&api_key).await
 }
 
 #[tauri::command]
@@ -271,12 +321,17 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|error| format!("Could not locate Flow's data folder: {error}"))?;
             let database = Database::open(&data_dir.join("flow.sqlite3"))?;
-            let settings = database.settings(credentials::has_api_key())?;
+            let settings = database.settings(
+                credentials::has_groq_api_key(),
+                credentials::has_deepgram_api_key(),
+            )?;
             platform::configure_keybind(&settings.keybind);
+            let deepgram = DeepgramClient::new()?;
             let groq = GroqClient::new()?;
             app.manage(AppState {
                 database,
                 recorder: AudioRecorder::new(),
+                deepgram,
                 groq,
                 workflow: workflow::WorkflowState::new(),
                 capture_limit_processing: AtomicBool::new(false),
@@ -318,7 +373,8 @@ pub fn run() {
             get_settings,
             save_settings,
             list_microphones,
-            test_api_key,
+            test_groq_api_key,
+            test_deepgram_api_key,
             copy_text,
             start_recording,
             stop_recording,
