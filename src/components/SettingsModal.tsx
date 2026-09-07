@@ -1,4 +1,5 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AudioLines,
   Check,
@@ -28,6 +29,7 @@ const defaults: SettingsData = {
   keybind: "Right Alt",
   launch_at_startup: false,
   history_retention: "30 days",
+  privacy_notice_version: null,
 };
 
 export function SettingsModal({
@@ -60,6 +62,43 @@ export function SettingsModal({
   const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const privacyButtonRef = useRef<HTMLButtonElement>(null);
+  const generalTabRef = useRef<HTMLButtonElement>(null);
+  const transcriptionTabRef = useRef<HTMLButtonElement>(null);
+
+  const testingMicRef = useRef(testingMic);
+  testingMicRef.current = testingMic;
+  const capturingHotkeyRef = useRef(capturingHotkey);
+  capturingHotkeyRef.current = capturingHotkey;
+
+  const handleTabKeyDown = (e: React.KeyboardEvent, current: "general" | "transcription") => {
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      if (current === "general") {
+        setActiveTab("transcription");
+        transcriptionTabRef.current?.focus();
+      } else {
+        setActiveTab("general");
+        generalTabRef.current?.focus();
+      }
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (current === "general") {
+        setActiveTab("transcription");
+        transcriptionTabRef.current?.focus();
+      } else {
+        setActiveTab("general");
+        generalTabRef.current?.focus();
+      }
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setActiveTab("general");
+      generalTabRef.current?.focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setActiveTab("transcription");
+      transcriptionTabRef.current?.focus();
+    }
+  };
 
   const dialogRef = useDialogFocus(true, returnFocusRef, () => {
     if (saving) return;
@@ -94,12 +133,17 @@ export function SettingsModal({
       .appConfig()
       .then(setAppConfig)
       .catch(() => {});
+
+    const onFocus = () => loadMicrophones();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [notify]);
 
   // Shortcut capture listener
   useEffect(() => {
     if (!capturingHotkey) return;
 
+    let disposed = false;
     let unlistenCapture: UnlistenFn | undefined;
     let unlistenCancel: UnlistenFn | undefined;
 
@@ -108,17 +152,20 @@ export function SettingsModal({
       setCapturingHotkey(false);
       setHotkeyError("");
     }).then((fn) => {
-      unlistenCapture = fn;
+      if (disposed) fn();
+      else unlistenCapture = fn;
     });
 
     void listen("shortcut-capture-cancelled", () => {
       setCapturingHotkey(false);
       setHotkeyError("");
     }).then((fn) => {
-      unlistenCancel = fn;
+      if (disposed) fn();
+      else unlistenCancel = fn;
     });
 
     return () => {
+      disposed = true;
       unlistenCapture?.();
       unlistenCancel?.();
     };
@@ -131,14 +178,17 @@ export function SettingsModal({
       return;
     }
 
+    let disposed = false;
     let unlistenLevel: UnlistenFn | undefined;
     void listen<{ level: number }>("audio-level", (event) => {
       setMicLevel(Math.max(0, Math.min(1, event.payload.level)));
     }).then((fn) => {
-      unlistenLevel = fn;
+      if (disposed) fn();
+      else unlistenLevel = fn;
     });
 
     return () => {
+      disposed = true;
       unlistenLevel?.();
     };
   }, [testingMic]);
@@ -146,14 +196,14 @@ export function SettingsModal({
   // Clean up mic test on unmount
   useEffect(() => {
     return () => {
-      if (testingMic) {
+      if (testingMicRef.current) {
         void api.stopMicrophoneTest();
       }
-      if (capturingHotkey) {
+      if (capturingHotkeyRef.current) {
         void api.cancelShortcutCapture();
       }
     };
-  }, [testingMic, capturingHotkey]);
+  }, []);
 
   const toggleMicTest = async () => {
     if (testingMic) {
@@ -295,7 +345,14 @@ export function SettingsModal({
     }
   };
 
-  return (
+  const modalRoot =
+    typeof document !== "undefined"
+      ? document.getElementById("modal-root") || document.body
+      : null;
+
+  if (!modalRoot) return null;
+
+  return createPortal(
     <>
       <div
         className="modal-backdrop"
@@ -325,25 +382,31 @@ export function SettingsModal({
           <div className="settings-layout">
             <nav className="settings-tabs" aria-label="Settings sections" role="tablist">
               <button
+                ref={generalTabRef}
                 id="settings-general-tab"
                 type="button"
                 role="tab"
+                tabIndex={activeTab === "general" ? 0 : -1}
                 aria-selected={activeTab === "general"}
                 aria-controls="settings-panel"
                 className={activeTab === "general" ? "active" : ""}
                 onClick={() => setActiveTab("general")}
+                onKeyDown={(e) => handleTabKeyDown(e, "general")}
               >
                 <SlidersHorizontal size={16} />
                 <span>General</span>
               </button>
               <button
+                ref={transcriptionTabRef}
                 id="settings-transcription-tab"
                 type="button"
                 role="tab"
+                tabIndex={activeTab === "transcription" ? 0 : -1}
                 aria-selected={activeTab === "transcription"}
                 aria-controls="settings-panel"
                 className={activeTab === "transcription" ? "active" : ""}
                 onClick={() => setActiveTab("transcription")}
+                onKeyDown={(e) => handleTabKeyDown(e, "transcription")}
               >
                 <AudioLines size={16} />
                 <span>Transcription</span>
@@ -397,9 +460,15 @@ export function SettingsModal({
                         }
                       >
                         <option value="">System default</option>
+                        {settings.microphone_id &&
+                          !microphones.some((m) => m.id === settings.microphone_id) && (
+                            <option value={settings.microphone_id} disabled>
+                              {settings.microphone_name || "Saved microphone"} (Unavailable)
+                            </option>
+                          )}
                         {microphones.map((microphone) => (
                           <option value={microphone.id} key={microphone.id}>
-                            {microphone.name}
+                            {microphone.name}{!microphone.is_available ? " (Unavailable)" : ""}
                           </option>
                         ))}
                       </select>
@@ -628,6 +697,7 @@ export function SettingsModal({
         onAccept={() => setPrivacyOpen(false)}
         returnFocusRef={privacyButtonRef}
       />
-    </>
+    </>,
+    modalRoot,
   );
 }

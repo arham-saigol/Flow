@@ -1,18 +1,30 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use reqwest::{multipart, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     error::{FlowError, Result},
     models::{DictionaryEntry, CLEANUP_MODEL, TRANSCRIPTION_MODEL},
 };
+use unicode_categories::UnicodeCategories;
 
 const API_BASE: &str = "https://api.groq.com/openai/v1";
 const SYSTEM_PROMPT: &str = include_str!("../prompts/dictation_cleanup.txt");
 const MAX_GUIDANCE_BYTES: usize = 200;
 const MAX_TRANSCRIPT_BYTES: usize = 32_000;
 const MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
+
+async fn read_bounded_body(mut resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.map_err(FlowError::Network)? {
+        if bytes.len() + chunk.len() > max_bytes {
+            return Err(FlowError::Message("Response exceeded 1 MB limit.".into()));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct VerboseTranscriptionResponse {
@@ -47,6 +59,8 @@ struct ChatMessage {
     content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,9 +132,10 @@ impl GroqClient {
             id: String,
         }
 
-        let models = response.json::<ModelsList>().await.map_err(|_| {
-            FlowError::Message("Could not parse Groq models list.".into())
-        })?;
+        let models = response
+            .json::<ModelsList>()
+            .await
+            .map_err(|_| FlowError::Message("Could not parse Groq models list.".into()))?;
 
         let has_whisper = models.data.iter().any(|m| m.id == TRANSCRIPTION_MODEL);
         let has_qwen = models.data.iter().any(|m| m.id == CLEANUP_MODEL);
@@ -141,9 +156,15 @@ impl GroqClient {
         dictionary_entries: &[DictionaryEntry],
     ) -> Result<TranscriptionResult> {
         let prompt = build_whisper_guidance(dictionary_entries);
+        let stage_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
 
         let mut attempts = 0;
         loop {
+            if tokio::time::Instant::now() >= stage_deadline {
+                return Err(FlowError::Message(
+                    "Transcription exceeded 90-second stage deadline.".into(),
+                ));
+            }
             attempts += 1;
             let file_part = multipart::Part::bytes(wav.clone())
                 .file_name("dictation.wav")
@@ -172,23 +193,38 @@ impl GroqClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        let bytes = resp.bytes().await?;
-                        if bytes.len() > MAX_BODY_BYTES {
-                            return Err(FlowError::Message("Transcription response exceeded 1 MB limit.".into()));
-                        }
-                        let verbose = serde_json::from_slice::<VerboseTranscriptionResponse>(&bytes)
-                            .map_err(|_| FlowError::Message("Invalid JSON from Whisper transcription.".into()))?;
-                        
+                        let bytes = read_bounded_body(resp, MAX_BODY_BYTES).await?;
+                        let verbose =
+                            serde_json::from_slice::<VerboseTranscriptionResponse>(&bytes)
+                                .map_err(|_| {
+                                    FlowError::Message(
+                                        "Invalid JSON from Whisper transcription.".into(),
+                                    )
+                                })?;
+
                         let trimmed = verbose.text.trim().to_string();
                         if trimmed.is_empty() {
                             return Err(FlowError::EmptyRecording);
                         }
 
                         // Check segments for suspect speech
-                        let mut is_suspect = false;
+                        // If segments are missing or nonfinite, must flag as suspect
+                        let mut is_suspect = verbose.segments.is_empty();
                         for seg in &verbose.segments {
-                            let no_speech = seg.no_speech_prob.unwrap_or(0.0);
-                            let avg_logprob = seg.avg_logprob.unwrap_or(0.0);
+                            let no_speech = match seg.no_speech_prob {
+                                Some(p) if p.is_finite() => p,
+                                _ => {
+                                    is_suspect = true;
+                                    break;
+                                }
+                            };
+                            let avg_logprob = match seg.avg_logprob {
+                                Some(p) if p.is_finite() => p,
+                                _ => {
+                                    is_suspect = true;
+                                    break;
+                                }
+                            };
                             let comp_ratio = seg.compression_ratio.unwrap_or(1.0);
 
                             if (no_speech >= 0.6 && avg_logprob <= -1.0) || comp_ratio > 2.4 {
@@ -197,24 +233,31 @@ impl GroqClient {
                             }
                         }
 
+                        // Preserve original Whisper text (trimmed view was used for validation)
                         return Ok(TranscriptionResult {
-                            text: trimmed,
+                            text: verbose.text,
                             is_suspect,
                         });
                     }
 
                     if is_retryable(status) && attempts < 3 {
-                        let delay = get_retry_delay(&resp, attempts);
-                        tokio::time::sleep(delay).await;
-                        continue;
+                        if let Some(delay) = get_retry_delay(&resp, attempts) {
+                            if tokio::time::Instant::now() + delay < stage_deadline {
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                        }
                     }
 
                     return Err(map_status_error(status));
                 }
                 Err(e) => {
-                    if attempts < 3 && (e.is_connect() || e.is_timeout()) {
-                        tokio::time::sleep(Duration::from_millis(1000 * attempts as u64)).await;
-                        continue;
+                    if attempts < 3 && e.is_connect() {
+                        let delay = Duration::from_millis(1000 * attempts as u64);
+                        if tokio::time::Instant::now() + delay < stage_deadline {
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     }
                     return Err(FlowError::Network(e));
                 }
@@ -229,13 +272,17 @@ impl GroqClient {
         corrected_transcript: &str,
     ) -> Result<String> {
         let bounded_raw = if raw_transcript.len() > MAX_TRANSCRIPT_BYTES {
-            return Err(FlowError::Message("Transcript exceeds 32,000 bytes limit.".into()));
+            return Err(FlowError::Message(
+                "Transcript exceeds 32,000 bytes limit.".into(),
+            ));
         } else {
             raw_transcript
         };
 
         let bounded_corrected = if corrected_transcript.len() > MAX_TRANSCRIPT_BYTES {
-            return Err(FlowError::Message("Corrected transcript exceeds 32,000 bytes limit.".into()));
+            return Err(FlowError::Message(
+                "Corrected transcript exceeds 32,000 bytes limit.".into(),
+            ));
         } else {
             corrected_transcript
         };
@@ -259,8 +306,14 @@ impl GroqClient {
             ]
         });
 
+        let stage_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         let mut attempts = 0;
         loop {
+            if tokio::time::Instant::now() >= stage_deadline {
+                return Err(FlowError::Message(
+                    "Cleanup exceeded 90-second stage deadline.".into(),
+                ));
+            }
             attempts += 1;
             let send_res = self
                 .client
@@ -274,46 +327,65 @@ impl GroqClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        let bytes = resp.bytes().await?;
-                        if bytes.len() > MAX_BODY_BYTES {
-                            return Err(FlowError::Message("Cleanup response exceeded 1 MB limit.".into()));
-                        }
+                        let bytes = read_bounded_body(resp, MAX_BODY_BYTES).await?;
+                        let chat: ChatResponse = serde_json::from_slice(&bytes).map_err(|_| {
+                            FlowError::Message("Invalid JSON from cleanup model.".into())
+                        })?;
 
-                        let chat: ChatResponse = serde_json::from_slice(&bytes)
-                            .map_err(|_| FlowError::Message("Invalid JSON from cleanup model.".into()))?;
-
-                        if chat.choices.is_empty() {
-                            return Err(FlowError::Message("Cleanup model returned no choices.".into()));
+                        if chat.choices.len() != 1 {
+                            return Err(FlowError::Message(
+                                "Cleanup model returned unexpected number of choices.".into(),
+                            ));
                         }
 
                         let choice = &chat.choices[0];
-                        if choice.message.refusal.is_some() {
-                            return Err(FlowError::Message("Cleanup request was refused by model.".into()));
+                        if choice.message.refusal.is_some() || choice.message.tool_calls.is_some() {
+                            return Err(FlowError::Message(
+                                "Cleanup request was refused or contained tool calls.".into(),
+                            ));
                         }
 
-                        if let Some(reason) = &choice.finish_reason {
-                            if reason != "stop" {
-                                return Err(FlowError::Message(format!(
-                                    "Cleanup completion was truncated or abnormal (finish_reason: {reason})."
-                                )));
-                            }
+                        if choice.finish_reason.as_deref() != Some("stop") {
+                            return Err(FlowError::Message(format!(
+                                "Cleanup completion was truncated or abnormal (finish_reason: {:?}).",
+                                choice.finish_reason
+                            )));
                         }
 
-                        let content = choice.message.content.as_deref().unwrap_or("").trim();
+                        let Some(ref content) = choice.message.content else {
+                            return Err(FlowError::Message(
+                                "Cleanup model returned null content.".into(),
+                            ));
+                        };
 
-                        // Check for embedded NUL
-                        if content.contains('\0') {
-                            return Err(FlowError::Message("Cleanup response contains disallowed NUL byte.".into()));
+                        if content.len() > MAX_TRANSCRIPT_BYTES {
+                            return Err(FlowError::Message(
+                                "Cleanup response exceeded 32,000 bytes limit.".into(),
+                            ));
+                        }
+
+                        // Check for disallowed control characters: C0 (except \t, \n, \r) and \x7f
+                        if content.chars().any(|c| {
+                            (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\x7f'
+                        }) {
+                            return Err(FlowError::Message(
+                                "Cleanup response contains disallowed control characters.".into(),
+                            ));
                         }
 
                         // Check for leaked reasoning block
                         if content.starts_with("<think>") || content.contains("</think>") {
-                            return Err(FlowError::Message("Cleanup response contains leaked reasoning block.".into()));
+                            return Err(FlowError::Message(
+                                "Cleanup response contains leaked reasoning block.".into(),
+                            ));
                         }
 
                         // Validate empty output
-                        if content.is_empty() {
-                            if is_filler_only(raw_transcript) && is_filler_only(corrected_transcript) {
+                        let trimmed = content.trim();
+                        if trimmed.is_empty() {
+                            if is_filler_only(raw_transcript)
+                                && is_filler_only(corrected_transcript)
+                            {
                                 return Ok(String::new());
                             } else {
                                 return Err(FlowError::Message(
@@ -322,21 +394,27 @@ impl GroqClient {
                             }
                         }
 
-                        return Ok(content.to_string());
+                        return Ok(trimmed.to_string());
                     }
 
                     if is_retryable(status) && attempts < 3 {
-                        let delay = get_retry_delay(&resp, attempts);
-                        tokio::time::sleep(delay).await;
-                        continue;
+                        if let Some(delay) = get_retry_delay(&resp, attempts) {
+                            if tokio::time::Instant::now() + delay < stage_deadline {
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                        }
                     }
 
                     return Err(map_status_error(status));
                 }
                 Err(e) => {
-                    if attempts < 3 && (e.is_connect() || e.is_timeout()) {
-                        tokio::time::sleep(Duration::from_millis(1000 * attempts as u64)).await;
-                        continue;
+                    if attempts < 3 && e.is_connect() {
+                        let delay = Duration::from_millis(1000 * attempts as u64);
+                        if tokio::time::Instant::now() + delay < stage_deadline {
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     }
                     return Err(FlowError::Network(e));
                 }
@@ -380,7 +458,7 @@ pub fn build_whisper_guidance(entries: &[DictionaryEntry]) -> String {
 fn is_filler_only(s: &str) -> bool {
     let lower = s.to_lowercase();
     let words: Vec<&str> = lower
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .split(|c: char| c.is_whitespace() || c.is_punctuation() || c.is_ascii_punctuation())
         .filter(|w| !w.is_empty())
         .collect();
 
@@ -388,7 +466,9 @@ fn is_filler_only(s: &str) -> bool {
         return true;
     }
 
-    words.iter().all(|&w| matches!(w, "um" | "uh" | "erm" | "er"))
+    words
+        .iter()
+        .all(|&w| matches!(w, "um" | "uh" | "erm" | "er"))
 }
 
 fn is_retryable(status: StatusCode) -> bool {
@@ -400,12 +480,14 @@ fn is_retryable(status: StatusCode) -> bool {
         || status == StatusCode::GATEWAY_TIMEOUT
 }
 
-fn get_retry_delay(resp: &reqwest::Response, attempt: usize) -> Duration {
+fn get_retry_delay(resp: &reqwest::Response, attempt: usize) -> Option<Duration> {
     if let Some(after_header) = resp.headers().get("Retry-After") {
         if let Ok(after_str) = after_header.to_str() {
             if let Ok(secs) = after_str.parse::<u64>() {
                 if secs <= 30 {
-                    return Duration::from_secs(secs);
+                    return Some(Duration::from_secs(secs));
+                } else {
+                    return None;
                 }
             }
         }
@@ -415,17 +497,29 @@ fn get_retry_delay(resp: &reqwest::Response, attempt: usize) -> Duration {
         1 => 1000,
         _ => 2000,
     };
-    let jitter = (SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_millis() % 250) as u64;
-    Duration::from_millis(base_ms + jitter)
+    let jitter = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_millis()
+        % 250) as u64;
+    Some(Duration::from_millis(base_ms + jitter))
 }
 
 fn map_status_error(status: StatusCode) -> FlowError {
     match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => FlowError::MissingApiKey,
-        StatusCode::NOT_FOUND => FlowError::Message("Requested model was not found on Groq.".into()),
-        StatusCode::PAYLOAD_TOO_LARGE => FlowError::Message("Audio attachment exceeded provider size limit.".into()),
-        StatusCode::TOO_MANY_REQUESTS => FlowError::Message("Groq rate limit reached. Please wait a moment and try again.".into()),
-        s if s.is_server_error() => FlowError::Message("Groq service is temporarily unavailable.".into()),
+        StatusCode::NOT_FOUND => {
+            FlowError::Message("Requested model was not found on Groq.".into())
+        }
+        StatusCode::PAYLOAD_TOO_LARGE => {
+            FlowError::Message("Audio attachment exceeded provider size limit.".into())
+        }
+        StatusCode::TOO_MANY_REQUESTS => FlowError::Message(
+            "Groq rate limit reached. Please wait a moment and try again.".into(),
+        ),
+        s if s.is_server_error() => {
+            FlowError::Message("Groq service is temporarily unavailable.".into())
+        }
         other => FlowError::Message(format!("Groq API error: {other}")),
     }
 }

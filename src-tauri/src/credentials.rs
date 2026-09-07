@@ -12,7 +12,7 @@ use windows::{
 use crate::error::{FlowError, Result};
 
 const TARGET: &str = "Flow/GroqApiKey";
-const MAX_CREDENTIAL_BLOB_BYTES: usize = 512 * 1024; // 512 KiB
+const MAX_CREDENTIAL_BLOB_BYTES: usize = 2560; // 2,560 bytes (CRED_MAX_CREDENTIAL_BLOB_SIZE)
 
 fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
@@ -31,9 +31,7 @@ impl Drop for CredGuard {
 }
 
 pub fn has_api_key() -> bool {
-    read_api_key()
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
+    matches!(read_api_key(), Ok(ref value) if !value.is_empty())
 }
 
 pub fn read_api_key() -> Result<String> {
@@ -72,7 +70,9 @@ pub fn read_api_key() -> Result<String> {
 
         let size = record.CredentialBlobSize as usize;
         if size > MAX_CREDENTIAL_BLOB_BYTES {
-            return Err(FlowError::Message("The stored API key is corrupt or too large.".into()));
+            return Err(FlowError::Message(
+                "The stored API key is corrupt or too large.".into(),
+            ));
         }
 
         let bytes = std::slice::from_raw_parts(record.CredentialBlob, size);
@@ -84,8 +84,10 @@ pub fn read_api_key() -> Result<String> {
             return Err(FlowError::MissingApiKey);
         }
 
-        if key_str.chars().any(|c| c.is_control() && c != '\t') {
-            return Err(FlowError::Message("The stored API key contains invalid characters.".into()));
+        if key_str.chars().any(|c| c.is_control()) {
+            return Err(FlowError::Message(
+                "The stored API key contains invalid characters.".into(),
+            ));
         }
 
         Ok(key_str.to_string())
@@ -95,10 +97,14 @@ pub fn read_api_key() -> Result<String> {
 pub fn save_api_key(api_key: &str) -> Result<()> {
     let key = api_key.trim();
     if key.is_empty() {
-        return Err(FlowError::Message("The Groq API key cannot be empty.".into()));
+        return Err(FlowError::Message(
+            "The Groq API key cannot be empty.".into(),
+        ));
     }
     if key.chars().any(|c| c.is_control()) {
-        return Err(FlowError::Message("The Groq API key cannot contain control characters.".into()));
+        return Err(FlowError::Message(
+            "The Groq API key cannot contain control characters.".into(),
+        ));
     }
     if key.len() > MAX_CREDENTIAL_BLOB_BYTES {
         return Err(FlowError::Message("The Groq API key is too long.".into()));
@@ -120,7 +126,9 @@ pub fn save_api_key(api_key: &str) -> Result<()> {
 
     unsafe {
         CredWriteW(&credential, 0).map_err(|error| {
-            FlowError::Windows(format!("Could not save API key to Windows Credential Manager: {error}"))
+            FlowError::Windows(format!(
+                "Could not save API key to Windows Credential Manager: {error}"
+            ))
         })
     }
 }

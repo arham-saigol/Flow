@@ -35,7 +35,13 @@ impl DiagnosticsLogger {
         }
     }
 
-    fn write_entry(&mut self, stage: &str, session_id: Option<u64>, error_code: Option<&str>, message: &str) {
+    fn write_entry(
+        &mut self,
+        stage: &str,
+        session_id: Option<u64>,
+        error_code: Option<&str>,
+        message: &str,
+    ) {
         self.rotate_if_needed();
 
         let now = SystemTime::now()

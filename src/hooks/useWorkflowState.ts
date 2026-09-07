@@ -25,21 +25,7 @@ export function useWorkflowState() {
     let unlisten: UnlistenFn | undefined;
     let isMounted = true;
 
-    // Fetch initial snapshot
-    api
-      .workflowState()
-      .then((initial) => {
-        if (!isMounted) return;
-        if (initial.revision >= revisionRef.current) {
-          revisionRef.current = initial.revision;
-          setSnapshot(initial);
-        }
-      })
-      .catch((err) => {
-        console.error("Failed to fetch initial workflow state:", err);
-      });
-
-    // Listen for state transitions
+    // Await listener installation BEFORE fetching initial snapshot to eliminate subscription race
     listen<WorkflowStateSnapshot>("workflow-state", (event) => {
       if (!isMounted) return;
       const next = event.payload;
@@ -51,12 +37,20 @@ export function useWorkflowState() {
       .then((unlistenFn) => {
         if (!isMounted) {
           unlistenFn();
-        } else {
-          unlisten = unlistenFn;
+          return;
+        }
+        unlisten = unlistenFn;
+        return api.workflowState();
+      })
+      .then((initial) => {
+        if (!isMounted || !initial) return;
+        if (initial.revision >= revisionRef.current) {
+          revisionRef.current = initial.revision;
+          setSnapshot(initial);
         }
       })
       .catch((err) => {
-        console.error("Failed to subscribe to workflow-state events:", err);
+        console.error("Failed to subscribe or fetch initial workflow state:", err);
       });
 
     return () => {

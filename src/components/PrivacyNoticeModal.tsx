@@ -5,7 +5,7 @@ import { Dialog } from "./Dialog";
 interface PrivacyNoticeModalProps {
   open: boolean;
   onAccept: () => void;
-  returnFocusRef: RefObject<HTMLElement>;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
 export function PrivacyNoticeModal({
@@ -19,61 +19,69 @@ export function PrivacyNoticeModal({
       onClose={() => {}}
       title="Privacy & Data Processing Notice"
       returnFocusRef={returnFocusRef}
-      maxWidthClass="max-w-xl"
+      size="lg"
     >
-      <div className="space-y-4">
-        <div className="flex items-center gap-3 p-3 bg-amber-500/10 border border-amber-500/20 rounded-xl text-amber-900">
-          <ShieldCheck className="w-6 h-6 text-amber-700 shrink-0" />
-          <p className="text-xs font-medium">
+      <div className="privacy-notice">
+        <div className="privacy-banner">
+          <ShieldCheck size={20} />
+          <span>
             Please review how Flow processes your speech before dictating.
-          </p>
+          </span>
         </div>
 
-        <ul className="space-y-3">
-          <li className="flex items-start gap-3">
-            <Server className="w-5 h-5 text-stone-500 mt-0.5 shrink-0" />
+        <ul className="privacy-list">
+          <li className="privacy-item">
+            <Server className="privacy-item__icon" />
             <div>
-              <span className="font-semibold text-stone-900 block">
-                Exclusive Remote Provider (Groq)
+              <span className="privacy-item__title">
+                Remote Provider (Groq Cloud API)
               </span>
-              <span className="text-xs text-stone-600">
-                Dictated audio is sent exclusively to Groq’s OpenAI-compatible endpoint using Whisper Large v3 for speech-to-text.
+              <span className="privacy-item__desc">
+                Dictated audio is sent to Groq’s endpoint using <code>whisper-large-v3</code> for speech-to-text. Raw transcripts, vocabulary hints, and text corrections are cleaned using <code>qwen/qwen3.8-27b</code> (Preview) with conservative editing instructions. Review Groq’s terms at{" "}
+                <a
+                  href="https://groq.com/privacy-policy/"
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  groq.com/privacy-policy
+                </a>.
               </span>
             </div>
           </li>
 
-          <li className="flex items-start gap-3">
-            <Lock className="w-5 h-5 text-stone-500 mt-0.5 shrink-0" />
+          <li className="privacy-item">
+            <Lock className="privacy-item__icon" />
             <div>
-              <span className="font-semibold text-stone-900 block">
-                Text Polishing & Redaction
+              <span className="privacy-item__title">
+                Zero Cloud Sync & No Conversational Memory
               </span>
-              <span className="text-xs text-stone-600">
-                Raw transcripts are cleaned using Groq’s hosted Qwen 2.5 32B model with strict privacy parameters. No conversational memory is maintained between dictations.
+              <span className="privacy-item__desc">
+                Flow contains no telemetry, analytics, background sync, or automatic model fallback. Each dictation is processed as an isolated request.
               </span>
             </div>
           </li>
 
-          <li className="flex items-start gap-3">
-            <HardDrive className="w-5 h-5 text-stone-500 mt-0.5 shrink-0" />
+          <li className="privacy-item">
+            <HardDrive className="privacy-item__icon" />
             <div>
-              <span className="font-semibold text-stone-900 block">
-                Zero Cloud Storage & Retention
+              <span className="privacy-item__title">
+                Local Storage & Retention Limits
               </span>
-              <span className="text-xs text-stone-600">
-                Groq does not train on your API submissions or retain dictations beyond ephemeral request execution. History and audio spools are stored strictly locally on your machine according to your retention settings.
+              <span className="privacy-item__desc">
+                Dictation history, temporary audio spools, and settings are stored locally on your machine in unencrypted SQLite and files. Recoverable pending recordings expire after 7 days (capped at 100 items / 256 MB). Pre-upgrade database backups expire after 7 days. Be aware that pasted dictations may be captured by Windows Clipboard History or Cloud Clipboard if enabled in Windows Settings.
               </span>
             </div>
           </li>
         </ul>
 
-        <div className="pt-4 border-t border-stone-200/80 flex justify-end">
+        <div className="modal-footer" style={{ padding: "16px 0 0", borderTop: "1px solid var(--border-soft)" }}>
           <button
             type="button"
             onClick={onAccept}
-            className="flex items-center gap-2 px-5 py-2.5 bg-stone-900 text-stone-50 hover:bg-stone-800 rounded-xl font-medium text-sm transition-colors shadow-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-900"
+            className="primary-button"
+            style={{ width: "100%" }}
           >
-            <CheckCircle2 className="w-4 h-4" />
+            <CheckCircle2 size={16} />
             I Understand & Accept
           </button>
         </div>

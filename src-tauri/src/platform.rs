@@ -18,22 +18,21 @@ use windows::{
         },
         System::{
             DataExchange::{
-                CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
-                GetClipboardData, GetClipboardOwner, GetOpenClipboardWindow, OpenClipboard,
-                RegisterClipboardFormatW, SetClipboardData,
+                CloseClipboard, EmptyClipboard, GetClipboardOwner, GetClipboardSequenceNumber,
+                GetOpenClipboardWindow, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
                 TH32CS_SNAPPROCESS,
             },
             LibraryLoader::GetModuleHandleW,
-            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
         },
         UI::{
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_ESCAPE,
-                VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_ESCAPE, VK_LWIN, VK_MENU,
+                VK_RWIN, VK_SHIFT,
             },
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::{
@@ -133,19 +132,7 @@ pub fn remembered_target() -> Option<TargetWindow> {
 fn is_flow_window(hwnd: isize) -> bool {
     let main = MAIN_HWND.load(Ordering::Acquire);
     let overlay = OVERLAY_HWND.load(Ordering::Acquire);
-    if main != 0 && hwnd == main {
-        return true;
-    }
-    if overlay != 0 && hwnd == overlay {
-        return true;
-    }
-    APP.get().is_some_and(|app| {
-        ["main", "overlay"].iter().any(|label| {
-            app.get_webview_window(label)
-                .and_then(|window| window.hwnd().ok())
-                .is_some_and(|handle| handle.0 as isize == hwnd)
-        })
-    })
+    (main != 0 && hwnd == main) || (overlay != 0 && hwnd == overlay)
 }
 
 pub fn configure_keybind(keybind: &str) {
@@ -473,32 +460,29 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<&'static str> {
     let target_hwnd = HWND(target.hwnd as *mut _);
     unsafe {
         if target.hwnd == 0 || !IsWindow(target_hwnd).as_bool() {
-            copy_text(text)?;
-            return Ok("copied");
+            return Err(FlowError::Windows(
+                "The target window is no longer valid.".into(),
+            ));
         }
         let mut current_pid = 0u32;
         GetWindowThreadProcessId(target_hwnd, Some(&mut current_pid));
         if target.pid != 0 && current_pid != target.pid {
-            copy_text(text)?;
-            return Ok("copied");
+            return Err(FlowError::Windows("The target process has changed.".into()));
         }
         if !SetForegroundWindow(target_hwnd).as_bool() {
-            copy_text(text)?;
-            return Ok("copied");
+            return Err(FlowError::Windows(
+                "Could not focus the target window.".into(),
+            ));
         }
         thread::sleep(Duration::from_millis(24));
         if GetForegroundWindow().0 != target_hwnd.0 {
-            copy_text(text)?;
-            return Ok("copied");
+            return Err(FlowError::Windows(
+                "The target window did not acquire focus.".into(),
+            ));
         }
     }
-    match paste_via_clipboard(target_hwnd, text) {
-        Ok(()) => Ok("pasted"),
-        Err(_) => {
-            copy_text(text)?;
-            Ok("copied")
-        }
-    }
+    paste_via_clipboard(target_hwnd, text)?;
+    Ok("pasted")
 }
 
 pub fn copy_text(text: &str) -> Result<()> {
@@ -633,7 +617,8 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
 
         let Some(original) = prepare_temporary_clipboard(target, text)? else {
             return Err(FlowError::Windows(
-                "Flow could not safely preserve the clipboard. Recovered dictation copied instead.".into(),
+                "Flow could not safely preserve the clipboard. Recovered dictation copied instead."
+                    .into(),
             ));
         };
         let paste_result = (|| {
@@ -700,25 +685,37 @@ unsafe fn prepare_temporary_clipboard(
     let Some(rendered_owner) = render_delayed_clipboard_with_timeout(owner) else {
         return Ok(None);
     };
+
+    let snapshot = match crate::clipboard_snapshot::capture_clipboard_snapshot() {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
     open_clipboard_with_retry(owner, "Could not preserve the clipboard")?;
     let captured_owner = GetClipboardOwner().map_or(0, |owner| owner.0 as isize);
     if captured_owner != rendered_owner {
-        // Ownership changed after the bounded render request. Do not risk a
-        // synchronous read from an owner that was never checked.
+        // Ownership changed after the bounded render request.
         let _ = CloseClipboard();
         return Ok(None);
     }
-    let original = match capture_open_clipboard() {
-        Ok(Some(original)) => Arc::new(original),
-        Ok(None) => {
-            let _ = CloseClipboard();
-            return Ok(None);
-        }
-        Err(error) => {
-            let _ = CloseClipboard();
-            return Err(error);
-        }
-    };
+
+    let current_seq = GetClipboardSequenceNumber();
+    if current_seq != snapshot.sequence_number {
+        // Clipboard sequence changed between snapshot and lock.
+        let _ = CloseClipboard();
+        return Ok(None);
+    }
+
+    let original = Arc::new(
+        snapshot
+            .formats
+            .into_iter()
+            .map(|item| ClipboardItem {
+                format: item.format_id,
+                data: item.data,
+            })
+            .collect(),
+    );
     let wide = encode_clipboard_text(text);
     match CLIPBOARD_RENDER_STATE.lock() {
         Ok(mut state) => {
@@ -851,64 +848,6 @@ unsafe fn exclude_from_clipboard_services() {
             let _ = write_clipboard_dword(format, 0);
         }
     }
-}
-
-unsafe fn capture_open_clipboard() -> Result<Option<Vec<ClipboardItem>>> {
-    const MAX_ITEM_BYTES: usize = 8 * 1024 * 1024;
-    const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
-
-    let mut items = Vec::new();
-    let mut total_bytes: usize = 0;
-    let mut previous_format = 0;
-    loop {
-        SetLastError(ERROR_SUCCESS);
-        let format = EnumClipboardFormats(previous_format);
-        if format == 0 {
-            if GetLastError() != ERROR_SUCCESS {
-                return Ok(None);
-            }
-            break;
-        }
-        if !is_hglobal_clipboard_format(format) {
-            return Ok(None);
-        }
-        let handle = match GetClipboardData(format) {
-            Ok(handle) => handle,
-            Err(_) => return Ok(None),
-        };
-        let allocation = HGLOBAL(handle.0);
-        let size = GlobalSize(allocation);
-        if size == 0 {
-            return Ok(None);
-        }
-        let Some(next_total) = total_bytes.checked_add(size) else {
-            return Ok(None);
-        };
-        if size > MAX_ITEM_BYTES || next_total > MAX_TOTAL_BYTES {
-            return Ok(None);
-        }
-        let pointer = GlobalLock(allocation).cast::<u8>();
-        if pointer.is_null() {
-            return Ok(None);
-        }
-        items.push(ClipboardItem {
-            format,
-            data: std::slice::from_raw_parts(pointer, size).to_vec(),
-        });
-        total_bytes = next_total;
-        let _ = GlobalUnlock(allocation);
-        previous_format = format;
-    }
-    if CountClipboardFormats() > 0 && items.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(items))
-}
-
-fn is_hglobal_clipboard_format(format: u32) -> bool {
-    // These ranges use owner-managed or GDI handles rather than HGLOBAL memory.
-    // Common semantic equivalents such as CF_DIB are still captured.
-    !matches!(format, 2 | 3 | 9 | 14 | 128 | 130 | 131 | 142 | 512..=1023)
 }
 
 unsafe fn restore_clipboard(items: &[ClipboardItem]) -> Result<()> {

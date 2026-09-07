@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Pencil, Trash2 } from "lucide-react";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import type { DictionaryEntry } from "../types";
@@ -101,80 +102,82 @@ export function EditableRow({
         </button>
       </div>
 
-      {editing && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && close()}
-        >
-          <section
-            ref={dialogRef}
-            className="creation-dialog creation-dialog--vocabulary"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="edit-dictionary-title"
+      {editing &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => event.target === event.currentTarget && close()}
           >
-            <header>
-              <h2 id="edit-dictionary-title">Edit vocabulary</h2>
-            </header>
-            <form onSubmit={(event) => void save(event)}>
-              <div className="creation-dialog__body">
-                <label className="dictionary-correction-toggle toggle-row">
-                  <div>
-                    <span>Correct a misspelling</span>
-                  </div>
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={correctingMisspelling}
-                    disabled={saving}
-                    onChange={(event) => setCorrectingMisspelling(event.target.checked)}
-                  />
-                </label>
-                {correctingMisspelling ? (
-                  <div className="dictionary-correction-fields">
+            <section
+              ref={dialogRef}
+              className="creation-dialog creation-dialog--vocabulary"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="edit-dictionary-title"
+            >
+              <header>
+                <h2 id="edit-dictionary-title">Edit vocabulary</h2>
+              </header>
+              <form onSubmit={(event) => void save(event)}>
+                <div className="creation-dialog__body">
+                  <label className="dictionary-correction-toggle toggle-row">
+                    <div>
+                      <span>Correct a misspelling</span>
+                    </div>
                     <input
-                      aria-label="Misspelling"
+                      type="checkbox"
+                      role="switch"
+                      checked={correctingMisspelling}
+                      disabled={saving}
+                      onChange={(event) => setCorrectingMisspelling(event.target.checked)}
+                    />
+                  </label>
+                  {correctingMisspelling ? (
+                    <div className="dictionary-correction-fields">
+                      <input
+                        aria-label="Misspelling"
+                        autoFocus
+                        placeholder="Misspelling"
+                        value={draft}
+                        maxLength={120}
+                        disabled={saving}
+                        onChange={(event) => setDraft(event.target.value)}
+                      />
+                      <span aria-hidden="true">→</span>
+                      <input
+                        aria-label="Correct spelling"
+                        placeholder="Correct spelling"
+                        value={draftCorrection}
+                        maxLength={120}
+                        disabled={saving}
+                        onChange={(event) => setDraftCorrection(event.target.value)}
+                      />
+                    </div>
+                  ) : (
+                    <input
+                      aria-label="Vocabulary word"
                       autoFocus
-                      placeholder="Misspelling"
                       value={draft}
                       maxLength={120}
                       disabled={saving}
                       onChange={(event) => setDraft(event.target.value)}
                     />
-                    <span aria-hidden="true">→</span>
-                    <input
-                      aria-label="Correct spelling"
-                      placeholder="Correct spelling"
-                      value={draftCorrection}
-                      maxLength={120}
-                      disabled={saving}
-                      onChange={(event) => setDraftCorrection(event.target.value)}
-                    />
-                  </div>
-                ) : (
-                  <input
-                    aria-label="Vocabulary word"
-                    autoFocus
-                    value={draft}
-                    maxLength={120}
-                    disabled={saving}
-                    onChange={(event) => setDraft(event.target.value)}
-                  />
-                )}
-              </div>
-              <footer>
-                <button className="secondary-button" type="button" disabled={saving} onClick={close}>
-                  Cancel
-                </button>
-                <button className="primary-button" type="submit" disabled={!canSave || saving}>
-                  {saving ? "Saving…" : "Save changes"}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      )}
+                  )}
+                </div>
+                <footer>
+                  <button className="secondary-button" type="button" disabled={saving} onClick={close}>
+                    Cancel
+                  </button>
+                  <button className="primary-button" type="submit" disabled={!canSave || saving}>
+                    {saving ? "Saving…" : "Save changes"}
+                  </button>
+                </footer>
+              </form>
+            </section>
+          </div>,
+          document.getElementById("modal-root") || document.body,
+        )}
     </div>
   );
 }

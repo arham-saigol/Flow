@@ -1,8 +1,8 @@
 mod audio;
 pub mod clipboard_snapshot;
 mod credentials;
-pub mod diagnostics;
 mod database;
+pub mod diagnostics;
 mod error;
 mod groq;
 mod models;
@@ -48,13 +48,30 @@ fn get_workflow_state(state: State<'_, AppState>) -> Result<WorkflowStateSnapsho
 }
 
 #[tauri::command]
-fn get_app_config(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<AppConfig> {
+fn get_app_config(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<AppConfig> {
     require_main_window(&window)?;
-    Ok(state.database.app_config())
+    let mut config = state.database.app_config();
+    if let Some((backup_file, backup_expires_at)) = state.database.get_backup_info() {
+        config.backup_file = Some(backup_file);
+        config.backup_expires_at = Some(backup_expires_at);
+    }
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let rec_dir = app_data.join("recovery");
+        config.allocated_recovery_bytes = Some(recovery::calculate_recovery_dir_usage(&rec_dir).1);
+    }
+    Ok(config)
 }
 
 #[tauri::command]
-fn get_dashboard(state: State<'_, AppState>) -> Result<DashboardData> {
+fn get_dashboard(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<DashboardData> {
+    require_main_window(&window)?;
     state.database.dashboard()
 }
 
@@ -111,7 +128,11 @@ fn delete_api_key(window: tauri::WebviewWindow) -> Result<()> {
 }
 
 #[tauri::command]
-fn list_dictionary(state: State<'_, AppState>) -> Result<Vec<DictionaryEntry>> {
+fn list_dictionary(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Vec<DictionaryEntry>> {
+    require_main_window(&window)?;
     state.database.dictionary()
 }
 
@@ -151,7 +172,8 @@ fn delete_dictionary(
 }
 
 #[tauri::command]
-fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>> {
+fn list_snippets(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<Vec<Snippet>> {
+    require_main_window(&window)?;
     state.database.snippets()
 }
 
@@ -179,17 +201,14 @@ fn update_snippet(
 }
 
 #[tauri::command]
-fn delete_snippet(
-    window: tauri::WebviewWindow,
-    state: State<'_, AppState>,
-    id: i64,
-) -> Result<()> {
+fn delete_snippet(window: tauri::WebviewWindow, state: State<'_, AppState>, id: i64) -> Result<()> {
     require_main_window(&window)?;
     state.database.delete_snippet(id)
 }
 
 #[tauri::command]
-fn get_settings(state: State<'_, AppState>) -> Result<SettingsData> {
+fn get_settings(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<SettingsData> {
+    require_main_window(&window)?;
     state.database.settings(credentials::has_api_key())
 }
 
@@ -282,7 +301,8 @@ async fn test_api_key(
 }
 
 #[tauri::command]
-fn copy_text(text: String) -> Result<()> {
+fn copy_text(window: tauri::WebviewWindow, text: String) -> Result<()> {
+    require_main_window(&window)?;
     platform::copy_text(&text)
 }
 
@@ -297,16 +317,27 @@ async fn stop_recording(app: AppHandle) -> Result<()> {
 }
 
 #[tauri::command]
-async fn retry_pending_dictation(app: AppHandle, id: i64) -> Result<()> {
-    workflow::retry_pending(&app, id).await
-}
-
-#[tauri::command]
-fn delete_pending_dictation(
+async fn retry_pending_dictation(
     window: tauri::WebviewWindow,
     app: AppHandle,
     id: i64,
 ) -> Result<()> {
+    require_main_window(&window)?;
+    workflow::retry_pending(&app, id).await
+}
+
+#[tauri::command]
+async fn retry_pending_transcription(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    workflow::retry_pending_transcription(&app, id).await
+}
+
+#[tauri::command]
+fn delete_pending_dictation(window: tauri::WebviewWindow, app: AppHandle, id: i64) -> Result<()> {
     require_main_window(&window)?;
     workflow::discard_pending(&app, id)
 }
@@ -342,26 +373,27 @@ fn start_microphone_test(
     device_id: String,
 ) -> Result<()> {
     require_main_window(&window)?;
-    let state = app.state::<AppState>();
-    let session_id = state.workflow.next_session();
-    state.recorder.start_mic_test(session_id, app.clone(), &device_id)
+    workflow::start_mic_test(&app, &device_id)
 }
 
 #[tauri::command]
-fn stop_microphone_test(
+fn stop_microphone_test(window: tauri::WebviewWindow, app: AppHandle) -> Result<()> {
+    require_main_window(&window)?;
+    workflow::stop_mic_test(&app)
+}
+
+#[tauri::command]
+fn acknowledge_privacy_notice(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
+    version: i64,
 ) -> Result<()> {
     require_main_window(&window)?;
-    state.recorder.stop_mic_test(0)
+    state.database.set_privacy_notice_acknowledged(version)
 }
 
 #[tauri::command]
-fn accept_pending_transcript(
-    window: tauri::WebviewWindow,
-    app: AppHandle,
-    id: i64,
-) -> Result<()> {
+fn accept_pending_transcript(window: tauri::WebviewWindow, app: AppHandle, id: i64) -> Result<()> {
     require_main_window(&window)?;
     workflow::accept_pending_transcript(&app, id)
 }
@@ -526,12 +558,14 @@ pub fn run() {
             cancel_recording,
             cancel_processing,
             retry_pending_dictation,
+            retry_pending_transcription,
             delete_pending_dictation,
             start_shortcut_capture,
             cancel_shortcut_capture,
             start_microphone_test,
             stop_microphone_test,
             accept_pending_transcript,
+            acknowledge_privacy_notice,
             export_diagnostics,
         ])
         .run(tauri::generate_context!())

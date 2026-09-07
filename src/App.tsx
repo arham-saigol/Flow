@@ -142,9 +142,12 @@ export default function App() {
       .settings()
       .then((settings) => {
         setKeybind(settings.keybind);
-        if (settings.has_seen_privacy_notice) {
+        if (settings.privacy_notice_version !== null && settings.privacy_notice_version >= 1) {
           localStorage.setItem("flow_seen_privacy_notice", "true");
           setPrivacyOpen(false);
+        } else {
+          localStorage.removeItem("flow_seen_privacy_notice");
+          setPrivacyOpen(true);
         }
       })
       .catch((error) => notify({ kind: "error", message: String(error) }));
@@ -173,6 +176,15 @@ export default function App() {
   const handleAcceptPrivacy = () => {
     localStorage.setItem("flow_seen_privacy_notice", "true");
     setPrivacyOpen(false);
+    void api
+      .acknowledgePrivacyNotice(1)
+      .then(() => {
+        notify({ kind: "success", message: "Privacy notice acknowledged" });
+      })
+      .catch((err) => {
+        console.error("Failed to acknowledge privacy notice:", err);
+        notify({ kind: "error", message: `Could not save privacy acknowledgement: ${err}` });
+      });
   };
 
   return (

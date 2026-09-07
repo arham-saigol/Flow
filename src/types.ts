@@ -4,10 +4,13 @@ export type WorkflowPhase =
   | "idle"
   | "starting"
   | "recording"
+  | "stopping"
   | "transcribing"
   | "cleaning"
   | "delivering"
-  | "faulted";
+  | "microphone_test"
+  | "faulted"
+  | "shutting_down";
 
 export interface WorkflowStateSnapshot {
   revision: number;
@@ -32,14 +35,13 @@ export type Keybind =
 
 export interface HistoryEntry {
   id: number;
-  uuid?: string;
+  capture_uuid: string | null;
   text: string;
   raw_text: string;
   word_count: number;
   duration_ms: number;
-  input_tokens?: number | null;
-  output_tokens?: number | null;
-  delivery_mode?: string;
+  delivery_outcome: string;
+  delivery_warning: string | null;
   created_at: number;
 }
 
@@ -56,6 +58,8 @@ export interface Snippet {
   id: number;
   trigger: string;
   content: string;
+  enabled: boolean;
+  conflict_reason: string | null;
   created_at: number;
 }
 
@@ -70,11 +74,22 @@ export interface DashboardData {
 
 export interface PendingDictation {
   id: number;
-  uuid?: string;
+  capture_uuid: string | null;
   text: string;
-  raw_text?: string | null;
-  stage: "transcription" | "cleanup" | "ready";
+  raw_text: string | null;
+  corrected_text: string | null;
+  stage: string;
+  partial: boolean;
+  review_reason: string | null;
+  no_content: boolean;
+  delivery_mode: string;
+  delivery_outcome: string;
+  delivery_warning: string | null;
   error: string | null;
+  error_code: string | null;
+  retry_after: number | null;
+  history_saved: boolean;
+  history_id: number | null;
   created_at: number;
 }
 
@@ -85,27 +100,31 @@ export interface SettingsData {
   keybind: string;
   launch_at_startup: boolean;
   history_retention: string;
-  has_seen_privacy_notice?: boolean;
+  privacy_notice_version: number | null;
 }
 
 export interface AppConfig {
-  version: string;
-  schema_version: number;
-  database_version: number;
-  groq_api_base: string;
+  max_dictionary_source_chars: number;
+  max_dictionary_correction_chars: number;
+  max_dictionary_entries: number;
+  max_snippet_trigger_chars: number;
+  max_snippet_content_chars: number;
+  max_snippets: number;
   transcription_model: string;
   cleanup_model: string;
-  cleanup_reasoning_effort: string;
+  recovery_retention_days: number;
   max_recovery_items: number;
   max_recovery_bytes: number;
-  recovery_retention_days: number;
-  default_history_retention: string;
+  supported_keybinds: string[];
+  supported_retentions: string[];
   backup_file: string | null;
   backup_expires_at: number | null;
+  allocated_recovery_bytes?: number;
 }
 
 export interface Microphone {
   id: string;
   name: string;
   is_default: boolean;
+  is_available: boolean;
 }

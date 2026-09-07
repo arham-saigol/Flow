@@ -14,8 +14,9 @@ use crate::{
     models::{
         AppConfig, DashboardData, DictionaryEntry, HistoryEntry, HistoryRetention, Keybind,
         PendingDictation, SettingsData, Snippet, MAX_DICTIONARY_CORRECTION_CHARS,
-        MAX_DICTIONARY_ENTRIES, MAX_DICTIONARY_SOURCE_CHARS, MAX_RECOVERY_BYTES, MAX_RECOVERY_ITEMS,
-        MAX_SNIPPETS, MAX_SNIPPET_CONTENT_CHARS, MAX_SNIPPET_TRIGGER_CHARS, RECOVERY_RETENTION_DAYS,
+        MAX_DICTIONARY_ENTRIES, MAX_DICTIONARY_SOURCE_CHARS, MAX_RECOVERY_BYTES,
+        MAX_RECOVERY_ITEMS, MAX_SNIPPETS, MAX_SNIPPET_CONTENT_CHARS, MAX_SNIPPET_TRIGGER_CHARS,
+        RECOVERY_RETENTION_DAYS,
     },
     text,
 };
@@ -23,9 +24,11 @@ use crate::{
 pub const WAV_RESERVATION_BYTES: u64 = 9_600_044; // 5 minutes 16kHz mono 16-bit PCM WAV
 pub const MARGIN_BYTES: u64 = 1_048_576; // 1 MiB
 pub const PRE_CAPTURE_RESERVATION_BYTES: u64 = 2 * WAV_RESERVATION_BYTES + MARGIN_BYTES; // 20,248,664 bytes
-pub const MIN_VOLUME_FREE_BYTES_START: u64 = 4 * WAV_RESERVATION_BYTES + MARGIN_BYTES + 64 * 1024 * 1024; // 106,557,616 bytes
+pub const MIN_VOLUME_FREE_BYTES_START: u64 =
+    4 * WAV_RESERVATION_BYTES + MARGIN_BYTES + 64 * 1024 * 1024; // 106,557,616 bytes
 #[allow(dead_code)]
-pub const MIN_VOLUME_FREE_BYTES_IMPORT: u64 = 2 * WAV_RESERVATION_BYTES + MARGIN_BYTES + 64 * 1024 * 1024; // 86,309,024 bytes
+pub const MIN_VOLUME_FREE_BYTES_IMPORT: u64 =
+    2 * WAV_RESERVATION_BYTES + MARGIN_BYTES + 64 * 1024 * 1024; // 86,309,024 bytes
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupMetadata {
@@ -79,11 +82,8 @@ impl Database {
             ",
         )?;
 
-        let current_version: i32 = connection.query_row(
-            "PRAGMA user_version",
-            [],
-            |row| row.get(0),
-        )?;
+        let current_version: i32 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if current_version > 2 {
             return Err(FlowError::Message(
@@ -174,11 +174,8 @@ impl Database {
             connection.execute("PRAGMA user_version = 1", [])?;
         }
 
-        let updated_version: i32 = connection.query_row(
-            "PRAGMA user_version",
-            [],
-            |row| row.get(0),
-        )?;
+        let updated_version: i32 =
+            connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if updated_version == 1 {
             // Backup before structural migration if this was an existing database
@@ -218,7 +215,8 @@ impl Database {
             )?;
 
             // Assign UUIDs to existing pending rows
-            let mut stmt = tx.prepare("SELECT id FROM pending_dictations WHERE capture_uuid IS NULL")?;
+            let mut stmt =
+                tx.prepare("SELECT id FROM pending_dictations WHERE capture_uuid IS NULL")?;
             let ids: Vec<i64> = stmt
                 .query_map([], |row| row.get(0))?
                 .filter_map(std::result::Result::ok)
@@ -312,12 +310,23 @@ impl Database {
         &self.path
     }
 
-    fn create_pre_upgrade_backup(conn: &Connection, db_path: &Path, original_version: i32) -> Result<()> {
+    fn create_pre_upgrade_backup(
+        conn: &Connection,
+        db_path: &Path,
+        original_version: i32,
+    ) -> Result<()> {
         let parent = db_path.parent().unwrap_or(Path::new("."));
+        let free_space = get_available_disk_space(parent)?;
+        let min_backup_free = 4 * WAV_RESERVATION_BYTES + MARGIN_BYTES + 64 * 1024 * 1024;
+        if free_space < min_backup_free {
+            return Err(FlowError::QuotaExceeded(
+                "Not enough free disk space to create pre-upgrade backup.".into(),
+            ));
+        }
+
         let backups_dir = parent.join("backups");
-        std::fs::create_dir_all(&backups_dir).map_err(|e| {
-            FlowError::Message(format!("Could not create backups folder: {e}"))
-        })?;
+        std::fs::create_dir_all(&backups_dir)
+            .map_err(|e| FlowError::Message(format!("Could not create backups folder: {e}")))?;
 
         let now = Self::now();
         let backup_file_name = format!("flow_backup_v{original_version}_{now}.sqlite3");
@@ -325,7 +334,31 @@ impl Database {
 
         let mut dst = Connection::open(&backup_path)?;
         let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        backup.run_to_completion(5, Duration::from_millis(250), None)?;
+        let busy_timeout = Duration::from_secs(10);
+        let mut busy_start: Option<std::time::Instant> = None;
+
+        loop {
+            match backup.step(100) {
+                Ok(rusqlite::backup::StepResult::Done) => break,
+                Ok(rusqlite::backup::StepResult::More) => {
+                    busy_start = None;
+                }
+                Ok(rusqlite::backup::StepResult::Busy)
+                | Ok(rusqlite::backup::StepResult::Locked) => {
+                    let bstart = busy_start.get_or_insert_with(std::time::Instant::now);
+                    if bstart.elapsed() > busy_timeout {
+                        return Err(FlowError::Message(
+                            "Database busy timeout exceeded during backup".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Ok(_) => {
+                    busy_start = None;
+                }
+                Err(e) => return Err(FlowError::from(e)),
+            }
+        }
 
         let metadata = BackupMetadata {
             created_at: now,
@@ -340,6 +373,20 @@ impl Database {
             .map_err(|e| FlowError::Message(format!("Could not save backup metadata: {e}")))?;
 
         Ok(())
+    }
+
+    pub fn get_backup_info(&self) -> Option<(String, i64)> {
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        let backups_dir = parent.join("backups");
+        let meta_path = backups_dir.join("backup_metadata.json");
+        if meta_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<BackupMetadata>(&content) {
+                    return Some((meta.backup_file, meta.expires_at));
+                }
+            }
+        }
+        None
     }
 
     pub fn delete_upgrade_backup(&self) -> Result<()> {
@@ -444,7 +491,11 @@ impl Database {
         if settings.keybind.parse::<Keybind>().is_err() {
             return Err(FlowError::Message("Unsupported keybind.".into()));
         }
-        if settings.history_retention.parse::<HistoryRetention>().is_err() {
+        if settings
+            .history_retention
+            .parse::<HistoryRetention>()
+            .is_err()
+        {
             return Err(FlowError::Message("Unsupported retention period.".into()));
         }
 
@@ -456,7 +507,11 @@ impl Database {
         Self::put_setting(
             &transaction,
             "launch_at_startup",
-            if settings.launch_at_startup { "true" } else { "false" },
+            if settings.launch_at_startup {
+                "true"
+            } else {
+                "false"
+            },
         )?;
         Self::put_setting(
             &transaction,
@@ -467,10 +522,12 @@ impl Database {
             Self::put_setting(&transaction, "privacy_notice_version", &v.to_string())?;
         }
         if let Some(seconds) = retention_seconds(&settings.history_retention) {
+            let cutoff = Self::now() - seconds;
             transaction.execute(
-                "DELETE FROM history WHERE created_at < ?1",
-                [Self::now() - seconds],
+                "UPDATE pending_dictations SET history_id = NULL WHERE history_id IN (SELECT id FROM history WHERE created_at < ?1)",
+                [cutoff],
             )?;
+            transaction.execute("DELETE FROM history WHERE created_at < ?1", [cutoff])?;
         }
         transaction.commit()?;
         Ok(())
@@ -483,10 +540,15 @@ impl Database {
 
     pub fn prune_expired_history(&self, retention: &str) -> Result<usize> {
         if let Some(seconds) = retention_seconds(retention) {
-            let deleted = self.conn()?.execute(
-                "DELETE FROM history WHERE created_at < ?1",
-                [Self::now() - seconds],
+            let mut conn = self.conn()?;
+            let tx = conn.transaction()?;
+            let cutoff = Self::now() - seconds;
+            tx.execute(
+                "UPDATE pending_dictations SET history_id = NULL WHERE history_id IN (SELECT id FROM history WHERE created_at < ?1)",
+                [cutoff],
             )?;
+            let deleted = tx.execute("DELETE FROM history WHERE created_at < ?1", [cutoff])?;
+            tx.commit()?;
             Ok(deleted)
         } else {
             Ok(0)
@@ -495,19 +557,20 @@ impl Database {
 
     pub fn prune_weekly_stats(&self) -> Result<usize> {
         let cutoff = Self::now() - 7 * 86_400;
-        let deleted = self.conn()?.execute(
-            "DELETE FROM weekly_stats WHERE created_at < ?1",
-            [cutoff],
-        )?;
+        let deleted = self
+            .conn()?
+            .execute("DELETE FROM weekly_stats WHERE created_at < ?1", [cutoff])?;
         Ok(deleted)
     }
 
-    pub fn prune_expired_pending(&self, active_pending_id: Option<i64>) -> Result<Vec<(i64, Option<String>)>> {
+    pub fn prune_expired_pending(
+        &self,
+        active_pending_id: Option<i64>,
+    ) -> Result<Vec<(i64, Option<String>)>> {
         let cutoff = Self::now() - RECOVERY_RETENTION_DAYS as i64 * 86_400;
         let conn = self.conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, capture_uuid FROM pending_dictations WHERE created_at < ?1",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, capture_uuid FROM pending_dictations WHERE created_at < ?1")?;
         let expired: Vec<(i64, Option<String>)> = stmt
             .query_map([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?
             .filter_map(std::result::Result::ok)
@@ -530,7 +593,7 @@ impl Database {
         )?;
 
         let total_items = (db_pending_count as usize) + spool_uuids;
-        if total_items >= MAX_RECOVERY_ITEMS {
+        if total_items + 1 > MAX_RECOVERY_ITEMS {
             return Err(FlowError::QuotaExceeded(format!(
                 "Maximum {MAX_RECOVERY_ITEMS} recovery items reached. Please copy or discard existing dictations."
             )));
@@ -543,15 +606,11 @@ impl Database {
             ));
         }
 
-        #[cfg(windows)]
-        {
-            if let Some(free_space) = get_available_disk_space(&self.path) {
-                if free_space < MIN_VOLUME_FREE_BYTES_START {
-                    return Err(FlowError::QuotaExceeded(
-                        "Not enough free disk space to start recording.".into(),
-                    ));
-                }
-            }
+        let free_space = get_available_disk_space(&self.path)?;
+        if free_space < MIN_VOLUME_FREE_BYTES_START {
+            return Err(FlowError::QuotaExceeded(
+                "Not enough free disk space to start recording.".into(),
+            ));
         }
 
         Ok(())
@@ -811,6 +870,24 @@ impl Database {
             .ok_or(FlowError::NotFound)
     }
 
+    pub fn has_capture_uuid(&self, uuid: &str) -> Result<bool> {
+        let conn = self.conn()?;
+        let in_pending: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pending_dictations WHERE capture_uuid = ?1)",
+            [uuid],
+            |row| row.get(0),
+        )?;
+        if in_pending {
+            return Ok(true);
+        }
+        let in_history: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM history WHERE capture_uuid = ?1)",
+            [uuid],
+            |row| row.get(0),
+        )?;
+        Ok(in_history)
+    }
+
     pub fn save_pending_transcript(
         &self,
         id: i64,
@@ -873,15 +950,29 @@ impl Database {
         delivery_warning: Option<&str>,
     ) -> Result<()> {
         let now = Self::now();
-        let rows = self.conn()?.execute(
-            "UPDATE pending_dictations
-             SET delivery_outcome = ?1, delivery_warning = ?2, updated_at = ?3
-             WHERE id = ?4",
-            params![delivery_outcome, delivery_warning, now, id],
-        )?;
-        if rows == 0 {
-            return Err(FlowError::NotFound);
+        let mut conn = self.conn()?;
+        let tx = conn.transaction()?;
+        let history_id: Option<i64> = tx
+            .query_row(
+                "UPDATE pending_dictations
+                 SET delivery_outcome = ?1, delivery_warning = ?2, updated_at = ?3
+                 WHERE id = ?4
+                 RETURNING history_id",
+                params![delivery_outcome, delivery_warning, now, id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(FlowError::NotFound)?;
+
+        if let Some(hid) = history_id {
+            tx.execute(
+                "UPDATE history
+                 SET delivery_outcome = ?1, delivery_warning = ?2
+                 WHERE id = ?3",
+                params![delivery_outcome, delivery_warning, hid],
+            )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -889,8 +980,8 @@ impl Database {
         let now = Self::now();
         let rows = self.conn()?.execute(
             "UPDATE pending_dictations
-             SET review_reason = NULL, updated_at = ?1
-             WHERE id = ?2 AND review_reason = 'suspect_speech' AND history_saved = 0",
+              SET review_reason = NULL, updated_at = ?1
+              WHERE id = ?2 AND review_reason = 'suspect_speech' AND history_saved = 0",
             params![now, id],
         )?;
         if rows == 0 {
@@ -899,58 +990,58 @@ impl Database {
         Ok(())
     }
 
-    pub fn save_pending_to_history(&self, id: i64, retention: &str) -> Result<i64> {
+    pub fn save_pending_to_history(&self, id: i64, retention: &str) -> Result<Option<i64>> {
+        struct PendingHistoryRow {
+            capture_uuid: Option<String>,
+            text: Option<String>,
+            raw_text: Option<String>,
+            duration_ms: i64,
+            delivery_outcome: String,
+            delivery_warning: Option<String>,
+            history_saved: bool,
+            existing_history_id: Option<i64>,
+        }
+
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
-        let (capture_uuid, text, raw_text, duration_ms, delivery_outcome, delivery_warning, history_saved, existing_history_id): (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            i64,
-            String,
-            Option<String>,
-            bool,
-            Option<i64>,
-        ) = tx
+        let row: PendingHistoryRow = tx
             .query_row(
                 "SELECT capture_uuid, final_text, raw_text, duration_ms, delivery_outcome,
                         delivery_warning, history_saved, history_id
                  FROM pending_dictations WHERE id = ?1",
                 [id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get::<_, i64>(6)? != 0,
-                        row.get(7)?,
-                    ))
+                |r| {
+                    Ok(PendingHistoryRow {
+                        capture_uuid: r.get(0)?,
+                        text: r.get(1)?,
+                        raw_text: r.get(2)?,
+                        duration_ms: r.get(3)?,
+                        delivery_outcome: r.get(4)?,
+                        delivery_warning: r.get(5)?,
+                        history_saved: r.get::<_, i64>(6)? != 0,
+                        existing_history_id: r.get(7)?,
+                    })
                 },
             )
             .optional()?
             .ok_or(FlowError::NotFound)?;
 
-        if history_saved {
-            if let Some(hid) = existing_history_id {
-                return Ok(hid);
-            }
+        if row.history_saved {
+            return Ok(row.existing_history_id);
         }
 
-        let text = text.ok_or_else(|| {
+        let text = row.text.ok_or_else(|| {
             FlowError::Message("That recoverable dictation is not ready to save.".into())
         })?;
-        let raw_text = raw_text.unwrap_or_default();
+        let raw_text = row.raw_text.unwrap_or_default();
         let word_count = text.split_whitespace().count() as i64;
         let now = Self::now();
 
         tx.execute(
             "INSERT INTO history(capture_uuid, text, raw_text, word_count, duration_ms, delivery_outcome, delivery_warning, created_at)
              VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![capture_uuid, text, raw_text, word_count, duration_ms, delivery_outcome, delivery_warning, now],
+            params![row.capture_uuid, text, raw_text, word_count, row.duration_ms, row.delivery_outcome, row.delivery_warning, now],
         )?;
         let history_id = tx.last_insert_rowid();
 
@@ -960,11 +1051,11 @@ impl Database {
              ON CONFLICT(id) DO UPDATE SET
                  total_words = total_words + excluded.total_words,
                  total_duration_ms = total_duration_ms + excluded.total_duration_ms",
-            params![word_count, duration_ms],
+            params![word_count, row.duration_ms],
         )?;
         tx.execute(
             "INSERT INTO weekly_stats(word_count, duration_ms, created_at) VALUES(?1, ?2, ?3)",
-            params![word_count, duration_ms, now],
+            params![word_count, row.duration_ms, now],
         )?;
 
         tx.execute(
@@ -973,15 +1064,21 @@ impl Database {
         )?;
 
         if let Some(seconds) = retention_seconds(retention) {
-            tx.execute("DELETE FROM history WHERE created_at < ?1", [now - seconds])?;
+            let cutoff = now - seconds;
+            tx.execute(
+                "UPDATE pending_dictations SET history_id = NULL WHERE history_id IN (SELECT id FROM history WHERE created_at < ?1)",
+                [cutoff],
+            )?;
+            tx.execute("DELETE FROM history WHERE created_at < ?1", [cutoff])?;
         }
 
         tx.commit()?;
-        Ok(history_id)
+        Ok(Some(history_id))
     }
 
     pub fn delete_pending(&self, id: i64) -> Result<()> {
-        let rows = self.conn()?
+        let rows = self
+            .conn()?
             .execute("DELETE FROM pending_dictations WHERE id = ?1", [id])?;
         if rows == 0 {
             return Err(FlowError::NotFound);
@@ -1265,7 +1362,9 @@ fn validate_dictionary_entry(
         return Err(FlowError::Message("Enter a word or name.".into()));
     }
     if value.chars().any(|c| c.is_control()) {
-        return Err(FlowError::Message("Control characters are not allowed.".into()));
+        return Err(FlowError::Message(
+            "Control characters are not allowed.".into(),
+        ));
     }
     if value.chars().count() > MAX_DICTIONARY_SOURCE_CHARS {
         return Err(FlowError::Message(format!(
@@ -1281,7 +1380,9 @@ fn validate_dictionary_entry(
     }
     if let Some(corr) = correction {
         if corr.chars().any(|c| c.is_control()) {
-            return Err(FlowError::Message("Control characters are not allowed.".into()));
+            return Err(FlowError::Message(
+                "Control characters are not allowed.".into(),
+            ));
         }
         if corr.chars().count() > MAX_DICTIONARY_CORRECTION_CHARS {
             return Err(FlowError::Message(format!(
@@ -1305,7 +1406,9 @@ fn validate_snippet(trigger: &str, content: &str) -> Result<(String, String)> {
         ));
     }
     if trigger.chars().any(|c| c.is_control()) {
-        return Err(FlowError::Message("Control characters are not allowed in triggers.".into()));
+        return Err(FlowError::Message(
+            "Control characters are not allowed in triggers.".into(),
+        ));
     }
     if trigger.chars().count() > MAX_SNIPPET_TRIGGER_CHARS {
         return Err(FlowError::Message(format!(
@@ -1318,8 +1421,13 @@ fn validate_snippet(trigger: &str, content: &str) -> Result<(String, String)> {
         ));
     }
 
-    if content.chars().any(|c| c == '\0' || (c.is_control() && c != '\t' && c != '\r' && c != '\n')) {
-        return Err(FlowError::Message("Disallowed control characters in content.".into()));
+    if content
+        .chars()
+        .any(|c| c == '\0' || (c.is_control() && c != '\t' && c != '\r' && c != '\n'))
+    {
+        return Err(FlowError::Message(
+            "Disallowed control characters in content.".into(),
+        ));
     }
     if content.chars().count() > MAX_SNIPPET_CONTENT_CHARS {
         return Err(FlowError::Message(format!(
@@ -1354,7 +1462,8 @@ fn normalized_trigger_exists(
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(triggers.into_iter().any(|(id, existing)| {
-        Some(id) != excluded_id && text::normalize_snippet_trigger(&existing) == Some(normalized.clone())
+        Some(id) != excluded_id
+            && text::normalize_snippet_trigger(&existing) == Some(normalized.clone())
     }))
 }
 
@@ -1364,8 +1473,9 @@ fn normalized_correction_source_exists(
     excluded_id: Option<i64>,
 ) -> Result<bool> {
     let normalized = text::normalize_correction_source(value);
-    let mut statement =
-        conn.prepare("SELECT id, value FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''")?;
+    let mut statement = conn.prepare(
+        "SELECT id, value FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''",
+    )?;
     let entries = statement
         .query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
@@ -1386,40 +1496,50 @@ fn map_unique_violation(error: rusqlite::Error, message: &str) -> FlowError {
 }
 
 #[cfg(windows)]
-pub fn get_available_disk_space(path: &Path) -> Option<u64> {
+pub fn get_available_disk_space(path: &Path) -> Result<u64> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
-    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let dir = if path.is_dir() {
+        path.to_path_buf()
+    } else {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."))
+    };
+
+    let path_wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let mut free_bytes = 0u64;
     unsafe {
-        if GetDiskFreeSpaceExW(
+        GetDiskFreeSpaceExW(
             windows::core::PCWSTR(path_wide.as_ptr()),
             Some(&mut free_bytes),
             None,
             None,
-        ).is_ok() {
-            Some(free_bytes)
-        } else {
-            None
-        }
+        )
+        .map_err(|e| FlowError::Windows(format!("Failed to query available disk space: {e}")))?;
     }
+    Ok(free_bytes)
 }
 
 #[cfg(not(windows))]
-pub fn get_available_disk_space(_path: &Path) -> Option<u64> {
-    None
+pub fn get_available_disk_space(_path: &Path) -> Result<u64> {
+    Ok(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
+    use super::Database;
+    use crate::models::SettingsData;
+    use rusqlite::Connection;
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
     };
-    use rusqlite::Connection;
-    use crate::models::SettingsData;
-    use super::Database;
 
     static DATABASE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -1456,7 +1576,11 @@ mod tests {
         assert_eq!(entries[0].correction, None);
         assert!(entries[0].enabled);
 
-        let user_ver: i32 = database.conn().unwrap().query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        let user_ver: i32 = database
+            .conn()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(user_ver, 2);
 
         drop(database);
@@ -1550,7 +1674,9 @@ mod tests {
         database
             .save_pending_transcript(id, "raw words", "raw words", None)
             .unwrap();
-        database.save_pending_final(id, "Final words", false).unwrap();
+        database
+            .save_pending_final(id, "Final words", false)
+            .unwrap();
         database.save_pending_to_history(id, "30 days").unwrap();
         database.save_pending_to_history(id, "30 days").unwrap();
         let dashboard = database.dashboard().unwrap();
@@ -1600,6 +1726,74 @@ mod tests {
         assert!(dashboard.history.is_empty());
         assert_eq!(dashboard.time_dictated_ms, 1_000);
         assert_eq!(dashboard.estimated_saved_ms, 2_000);
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_probe_22_history_idempotence() {
+        let path = database_path("probe-22-idempotence");
+        let database = Database::open(&path).unwrap();
+        let id = database
+            .insert_pending_recording("uuid-p22", b"wav", 1_000, false, None, "automatic")
+            .unwrap();
+        database
+            .save_pending_transcript(id, "two words", "two words", None)
+            .unwrap();
+        database.save_pending_final(id, "two words", false).unwrap();
+
+        // First save creates history and stats
+        let history_id = database
+            .save_pending_to_history(id, "30 days")
+            .unwrap()
+            .unwrap();
+        let dash1 = database.dashboard().unwrap();
+        assert_eq!(dash1.total_words_dictated, 2);
+        assert_eq!(dash1.history.len(), 1);
+
+        // Explicitly delete history entry
+        database.delete_history_entry(history_id).unwrap();
+        let dash2 = database.dashboard().unwrap();
+        assert_eq!(dash2.history.len(), 0);
+
+        // Invoking save_pending_to_history again: history_saved is authoritative!
+        // It must NOT recreate history or increment total words
+        let second_result = database.save_pending_to_history(id, "30 days").unwrap();
+        assert!(second_result.is_none());
+
+        let dash3 = database.dashboard().unwrap();
+        assert_eq!(dash3.history.len(), 0);
+        assert_eq!(dash3.total_words_dictated, 2);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_probe_23_update_delivery_updates_history() {
+        let path = database_path("probe-23-delivery");
+        let database = Database::open(&path).unwrap();
+        let id = database
+            .insert_pending_recording("uuid-p23", b"wav", 1_000, false, None, "automatic")
+            .unwrap();
+        database
+            .save_pending_transcript(id, "hello", "hello", None)
+            .unwrap();
+        database.save_pending_final(id, "hello", false).unwrap();
+
+        let _ = database.save_pending_to_history(id, "30 days").unwrap();
+
+        // Update pending delivery to copied
+        database
+            .update_pending_delivery(id, "copied", Some("warning"))
+            .unwrap();
+
+        // Verify history row now reflects copied
+        let dash = database.dashboard().unwrap();
+        assert_eq!(dash.history.len(), 1);
+        assert_eq!(dash.history[0].delivery_outcome, "copied");
+        assert_eq!(dash.history[0].delivery_warning.as_deref(), Some("warning"));
+
         drop(database);
         let _ = std::fs::remove_file(path);
     }

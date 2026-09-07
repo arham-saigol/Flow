@@ -1,4 +1,5 @@
-import { type ReactNode, type RefObject } from "react";
+import { type ReactNode, type RefObject, useId } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 
@@ -7,8 +8,9 @@ interface DialogProps {
   onClose: () => void;
   title: string;
   children: ReactNode;
-  returnFocusRef: RefObject<HTMLElement>;
-  maxWidthClass?: string;
+  returnFocusRef?: RefObject<HTMLElement | null>;
+  size?: "sm" | "md" | "lg" | "xl";
+  maxWidthClass?: string; // backwards compatibility
 }
 
 export function Dialog({
@@ -17,15 +19,23 @@ export function Dialog({
   title,
   children,
   returnFocusRef,
-  maxWidthClass = "max-w-lg",
+  size = "md",
 }: DialogProps) {
+  const titleId = useId();
   const dialogRef = useDialogFocus(open, returnFocusRef, onClose);
 
   if (!open) return null;
 
-  return (
+  const modalRoot =
+    typeof document !== "undefined"
+      ? document.getElementById("modal-root") || document.body
+      : null;
+
+  if (!modalRoot) return null;
+
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 animate-fade-in"
+      className="modal-backdrop"
       onClick={(e) => {
         if (e.target === e.currentTarget) {
           onClose();
@@ -37,27 +47,26 @@ export function Dialog({
         ref={dialogRef as RefObject<HTMLElement>}
         role="dialog"
         aria-modal="true"
-        aria-labelledby="dialog-title"
+        aria-labelledby={titleId}
         tabIndex={-1}
-        className={`w-full ${maxWidthClass} bg-stone-50 border border-stone-300/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col focus:outline-none`}
+        className={`modal-panel modal-panel--${size}`}
       >
-        <header className="flex items-center justify-between px-6 py-4 border-b border-stone-200/80 bg-stone-100/50">
-          <h2 id="dialog-title" className="text-lg font-semibold text-stone-900">
+        <header className="modal-header">
+          <h2 id={titleId} className="modal-title">
             {title}
           </h2>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close dialog"
-            className="rounded-lg p-1.5 text-stone-500 hover:text-stone-800 hover:bg-stone-200/60 transition-colors focus-visible:outline-2 focus-visible:outline-stone-800"
+            className="modal-close-btn"
           >
-            <X className="w-5 h-5" />
+            <X size={18} />
           </button>
         </header>
-        <div className="p-6 overflow-y-auto max-h-[80vh] text-stone-700 text-sm">
-          {children}
-        </div>
+        <div className="modal-body">{children}</div>
       </section>
-    </div>
+    </div>,
+    modalRoot,
   );
 }

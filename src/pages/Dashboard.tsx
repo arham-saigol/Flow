@@ -1,21 +1,23 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowDown,
   Check,
-  CheckCircle2,
   Copy,
-  Cpu,
-  FileText,
   RotateCcw,
+  Square,
   Trash2,
+  X,
 } from "lucide-react";
 import { api } from "../api";
+import { Dialog } from "../components/Dialog";
 import { EmptyState } from "../components/EmptyState";
 import { HistoryDetail } from "../components/HistoryDetail";
+import { useWorkflowState } from "../hooks/useWorkflowState";
 import type { ToastData } from "../components/Toast";
-import type { DashboardData, HistoryEntry } from "../types";
+import type { DashboardData, HistoryEntry, PendingDictation } from "../types";
 
 const empty: DashboardData = {
   total_words_dictated: 0,
@@ -49,6 +51,73 @@ function relativeTime(timestamp: number) {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+function SuspectReviewModal({
+  entry,
+  onClose,
+  onAccept,
+  onRetranscribe,
+  returnFocusRef,
+}: {
+  entry: PendingDictation | null;
+  onClose: () => void;
+  onAccept: (id: number) => void;
+  onRetranscribe: (id: number) => void;
+  returnFocusRef?: RefObject<HTMLElement | null>;
+}) {
+  if (!entry) return null;
+  return (
+    <Dialog
+      open={Boolean(entry)}
+      onClose={onClose}
+      title="Review Suspect Dictation"
+      returnFocusRef={returnFocusRef}
+      size="lg"
+    >
+      <div>
+        <div className="privacy-banner">
+          <AlertCircle size={20} />
+          <span>
+            The speech model flagged this transcription as low confidence or missing confidence metadata. Please review the raw transcript before proceeding.
+          </span>
+        </div>
+        <div className="detail-section">
+          <label className="detail-section-label">Raw Dictation Text</label>
+          <div className="detail-text-box detail-text-box--raw">
+            {entry.raw_text || entry.text}
+          </div>
+        </div>
+        <div className="modal-footer" style={{ padding: "16px 0 0", borderTop: "1px solid var(--border-soft)" }}>
+          <button type="button" className="secondary-button" onClick={onClose}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              onClose();
+              onRetranscribe(entry.id);
+            }}
+          >
+            <RotateCcw size={14} />
+            Retranscribe
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => {
+              onClose();
+              onAccept(entry.id);
+            }}
+          >
+            <Check size={14} />
+            Accept & Polish
+          </button>
+        </div>
+      </div>
+    </Dialog>
+  );
+}
+
 export function Dashboard({
   version,
   keybind,
@@ -64,30 +133,55 @@ export function Dashboard({
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [retryingId, setRetryingId] = useState<number | null>(null);
   const [selectedHistory, setSelectedHistory] = useState<HistoryEntry | null>(null);
-  const historyRowRef = useRef<HTMLButtonElement>(null);
+  const [reviewingPending, setReviewingPending] = useState<PendingDictation | null>(null);
+  const lastClickedTriggerRef = useRef<HTMLElement | null>(null);
+  const loadGenerationRef = useRef(0);
   const [, setNow] = useState(Date.now());
+
+  const workflow = useWorkflowState();
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
+  const refreshDashboard = () => {
     if (!isTauri()) {
       setLoading(false);
       return;
     }
-
+    const currentGen = ++loadGenerationRef.current;
     setLoading(true);
     api
       .dashboard()
       .then((res) => {
-        setData(res);
-        setHasMoreHistory(res.history.length >= 50);
+        if (currentGen === loadGenerationRef.current) {
+          setData(res);
+          setHasMoreHistory(res.history.length >= 50);
+        }
       })
-      .catch((error) => notify({ kind: "error", message: String(error) }))
-      .finally(() => setLoading(false));
+      .catch((error) => {
+        if (currentGen === loadGenerationRef.current) {
+          notify({ kind: "error", message: String(error) });
+        }
+      })
+      .finally(() => {
+        if (currentGen === loadGenerationRef.current) {
+          setLoading(false);
+        }
+      });
+  };
+
+  useEffect(() => {
+    refreshDashboard();
   }, [notify, version]);
+
+  // Refresh when workflow returns to idle
+  useEffect(() => {
+    if (workflow.phase === "idle") {
+      refreshDashboard();
+    }
+  }, [workflow.phase]);
 
   const loadMoreHistory = async () => {
     if (loadingMore || !hasMoreHistory || data.history.length === 0) return;
@@ -138,7 +232,35 @@ export function Dashboard({
   const handleAcceptPending = async (id: number) => {
     try {
       await api.acceptPendingTranscript(id);
-      notify({ kind: "success", message: "Transcript accepted and delivered" });
+      notify({ kind: "success", message: "Transcript accepted and processing" });
+      refreshDashboard();
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const handleRetranscribePending = async (id: number) => {
+    try {
+      setRetryingId(id);
+      await api.retryPendingTranscription(id);
+      notify({ kind: "success", message: "Retranscription started" });
+      refreshDashboard();
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    } finally {
+      setRetryingId(null);
+    }
+  };
+
+  const handleDiscardPending = async (id: number) => {
+    if (!window.confirm("Discard this dictation permanently?")) return;
+    try {
+      await api.deletePendingDictation(id);
+      setData((curr) => ({
+        ...curr,
+        pending: curr.pending.filter((p) => p.id !== id),
+      }));
+      notify({ kind: "success", message: "Dictation discarded" });
     } catch (err) {
       notify({ kind: "error", message: String(err) });
     }
@@ -151,6 +273,9 @@ export function Dashboard({
     { label: "Estimated time saved this week", value: formatDuration(data.estimated_saved_ms) },
   ];
 
+  const isRecording = workflow.phase === "recording";
+  const isBusy = workflow.phase !== "idle" && workflow.phase !== "faulted";
+
   return (
     <>
       <section className="page">
@@ -159,7 +284,46 @@ export function Dashboard({
             <h1>Dictation</h1>
             <p>Everything you’ve said, made clearer.</p>
           </div>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            {isRecording && (
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void api.stopRecording().catch((e) => notify({ kind: "error", message: String(e) }))}
+              >
+                <Square size={14} />
+                Stop Recording
+              </button>
+            )}
+            {isBusy && (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void api.cancelRecording().catch((e) => notify({ kind: "error", message: String(e) }))}
+              >
+                <X size={14} />
+                Cancel
+              </button>
+            )}
+          </div>
         </header>
+
+        {workflow.phase === "faulted" && (
+          <div
+            className="privacy-banner"
+            style={{
+              background: "#fde8e8",
+              borderColor: "#f8b4b4",
+              color: "#99281e",
+              marginBottom: "20px",
+            }}
+          >
+            <AlertTriangle size={20} />
+            <span>
+              The microphone stream encountered an unrecoverable error. Please restart Flow to reconnect audio.
+            </span>
+          </div>
+        )}
 
         <div className="metric-grid">
           {cards.map(({ label, value }) => (
@@ -174,46 +338,74 @@ export function Dashboard({
           {data.pending.length > 0 && (
             <div className="pending-list" aria-label="Recoverable dictations">
               {data.pending.map((entry) => {
-                const actionsDisabled = retryingId !== null;
+                const isRowActive =
+                  retryingId === entry.id || workflow.active_pending_id === entry.id;
+                const actionsDisabled = isRowActive || (workflow.active_pending_id !== null && workflow.active_pending_id !== entry.id);
                 const isReady = entry.stage === "ready";
+                const isSuspect = entry.review_reason === "suspect_speech";
+                const isPartial = entry.partial || entry.review_reason === "partial_capture";
+
                 return (
                   <article className="pending-row" key={entry.id}>
                     <div>
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                      <div className="pending-row-header">
+                        {isSuspect ? (
+                          <AlertTriangle size={15} style={{ color: "#b25e1d" }} />
+                        ) : (
+                          <AlertCircle size={15} style={{ color: "var(--muted)" }} />
+                        )}
                         <strong>
                           {isReady
-                            ? "Dictation ready to paste"
+                            ? "Dictation ready"
+                            : isSuspect
+                            ? "Review required: suspect transcript"
+                            : entry.no_content
+                            ? "No speech detected"
                             : `Dictation paused at ${entry.stage}`}
                         </strong>
-                        <span className="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 font-medium uppercase">
+                        <span
+                          className={`pending-badge ${
+                            isReady
+                              ? "pending-badge--ready"
+                              : isSuspect
+                              ? "pending-badge--review"
+                              : "pending-badge--paused"
+                          }`}
+                        >
                           {entry.stage}
                         </span>
+                        {isPartial && (
+                          <span className="pending-badge pending-badge--review">
+                            partial
+                          </span>
+                        )}
                       </div>
-                      <p className="mt-1 text-sm text-stone-800 font-medium">
-                        {entry.text || "Recording audio preserved. Ready to transcribe."}
+                      <p className="pending-row-text">
+                        {entry.text || entry.raw_text || "Audio preserved in recovery spool. Ready to process."}
                       </p>
                       {entry.raw_text && entry.raw_text !== entry.text && (
-                        <p className="text-xs text-stone-500 font-mono mt-0.5">
+                        <p className="pending-row-raw">
                           Raw: {entry.raw_text}
                         </p>
                       )}
                       {entry.error && (
-                        <small className="text-red-700 block mt-1 font-sans">
+                        <small className="pending-row-error">
                           {entry.error}
                         </small>
                       )}
                     </div>
-                    <div className="pending-row__actions flex items-center gap-1.5 flex-wrap">
-                      {isReady && (
+                    <div className="pending-row__actions">
+                      {isSuspect && (
                         <button
                           type="button"
-                          className="secondary-button compact font-semibold bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100"
+                          className="secondary-button compact"
                           disabled={actionsDisabled}
-                          onClick={() => void handleAcceptPending(entry.id)}
+                          onClick={(e) => {
+                            lastClickedTriggerRef.current = e.currentTarget;
+                            setReviewingPending(entry);
+                          }}
                         >
-                          <CheckCircle2 size={13} />
-                          Deliver
+                          Review & Accept
                         </button>
                       )}
                       {entry.text && (
@@ -224,49 +416,46 @@ export function Dashboard({
                           onClick={(e) => void handleCopyText(e, entry.text)}
                         >
                           <Copy size={13} />
-                          Copy
+                          {isReady ? "Copy Final" : "Copy"}
                         </button>
                       )}
-                      {entry.raw_text && entry.raw_text !== entry.text && (
+                      {entry.raw_text && (entry.raw_text !== entry.text || !entry.text) && (
                         <button
                           type="button"
-                          className="secondary-button compact text-stone-600"
+                          className="secondary-button compact"
                           disabled={actionsDisabled}
                           onClick={(e) => void handleCopyText(e, entry.raw_text!)}
                         >
                           Copy Raw
                         </button>
                       )}
+                      {!isReady && !entry.no_content && (
+                        <button
+                          type="button"
+                          className="secondary-button compact"
+                          disabled={actionsDisabled}
+                          onClick={() => {
+                            if (isPartial && !window.confirm("This dictation is partial or was interrupted. Retry processing?")) {
+                              return;
+                            }
+                            setRetryingId(entry.id);
+                            void api
+                              .retryPendingDictation(entry.id)
+                              .then(refreshDashboard)
+                              .catch((error) => notify({ kind: "error", message: String(error) }))
+                              .finally(() => setRetryingId(null));
+                          }}
+                        >
+                          <RotateCcw size={13} />
+                          Retry
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="secondary-button compact"
+                        style={{ color: "#99281e" }}
                         disabled={actionsDisabled}
-                        onClick={() => {
-                          setRetryingId(entry.id);
-                          void api
-                            .retryPendingDictation(entry.id)
-                            .catch((error) => notify({ kind: "error", message: String(error) }))
-                            .finally(() => setRetryingId(null));
-                        }}
-                      >
-                        <RotateCcw size={13} />
-                        Retry
-                      </button>
-                      <button
-                        type="button"
-                        className="secondary-button compact text-stone-500 hover:text-red-700"
-                        disabled={actionsDisabled}
-                        onClick={() =>
-                          void api
-                            .deletePendingDictation(entry.id)
-                            .then(() =>
-                              setData((current) => ({
-                                ...current,
-                                pending: current.pending.filter((item) => item.id !== entry.id),
-                              })),
-                            )
-                            .catch((error) => notify({ kind: "error", message: String(error) }))
-                        }
+                        onClick={() => void handleDiscardPending(entry.id)}
                       >
                         Discard
                       </button>
@@ -285,65 +474,48 @@ export function Dashboard({
           ) : data.history.length > 0 ? (
             <div className="history-list">
               {data.history.map((entry) => (
-                <button
-                  ref={historyRowRef}
-                  className="history-row group relative text-left w-full"
-                  key={entry.id}
-                  onClick={() => setSelectedHistory(entry)}
-                >
-                  <div className="flex items-center justify-between w-full mb-1">
-                    <time
-                      className="text-xs text-stone-500"
-                      dateTime={new Date(entry.created_at * 1000).toISOString()}
-                    >
+                <div className="history-item" key={entry.id}>
+                  <button
+                    type="button"
+                    className="history-item__trigger"
+                    onClick={(e) => {
+                      lastClickedTriggerRef.current = e.currentTarget;
+                      setSelectedHistory(entry);
+                    }}
+                  >
+                    <time dateTime={new Date(entry.created_at * 1000).toISOString()}>
                       {relativeTime(entry.created_at)}
                     </time>
-                    <div className="flex items-center gap-2">
-                      {(entry.input_tokens || entry.output_tokens) && (
-                        <span
-                          className="flex items-center gap-1 text-[11px] text-stone-400"
-                          title="Tokens consumed"
-                        >
-                          <Cpu size={11} />
-                          {entry.input_tokens ?? 0}/{entry.output_tokens ?? 0}
-                        </span>
-                      )}
-                      {entry.delivery_mode === "copy" && (
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-stone-200/70 text-stone-600 font-medium">
-                          Copied
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        className="opacity-0 group-hover:opacity-100 p-1 text-stone-400 hover:text-stone-700 rounded transition-opacity"
-                        title="Copy text"
-                        onClick={(e) => void handleCopyText(e, entry.text)}
-                      >
-                        <Copy size={13} />
-                      </button>
-                      <button
-                        type="button"
-                        className="opacity-0 group-hover:opacity-100 p-1 text-stone-400 hover:text-red-600 rounded transition-opacity"
-                        title="Delete entry"
-                        onClick={(e) => void handleDeleteHistoryEntry(e, entry.id)}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
+                    <p title={entry.text}>{entry.text}</p>
+                  </button>
+                  <div className="history-item__actions">
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="Copy text"
+                      onClick={(e) => void handleCopyText(e, entry.text)}
+                    >
+                      <Copy size={13} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      title="Delete entry"
+                      onClick={(e) => void handleDeleteHistoryEntry(e, entry.id)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
                   </div>
-                  <p className="line-clamp-2 text-stone-800" title={entry.text}>
-                    {entry.text}
-                  </p>
-                </button>
+                </div>
               ))}
 
               {hasMoreHistory && (
-                <div className="pt-3 pb-1 flex justify-center">
+                <div style={{ padding: "14px 0 6px", display: "flex", justifyContent: "center" }}>
                   <button
                     type="button"
                     disabled={loadingMore}
                     onClick={() => void loadMoreHistory()}
-                    className="secondary-button compact text-xs flex items-center gap-1.5"
+                    className="secondary-button compact"
                   >
                     <ArrowDown size={13} />
                     {loadingMore ? "Loading older history…" : "Load older dictations"}
@@ -358,7 +530,15 @@ export function Dashboard({
       <HistoryDetail
         entry={selectedHistory}
         onClose={() => setSelectedHistory(null)}
-        returnFocusRef={historyRowRef}
+        returnFocusRef={lastClickedTriggerRef}
+      />
+
+      <SuspectReviewModal
+        entry={reviewingPending}
+        onClose={() => setReviewingPending(null)}
+        onAccept={(id) => void handleAcceptPending(id)}
+        onRetranscribe={(id) => void handleRetranscribePending(id)}
+        returnFocusRef={lastClickedTriggerRef}
       />
     </>
   );

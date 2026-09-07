@@ -10,14 +10,13 @@ describe("Frontend Modal Components", () => {
   it("renders HistoryDetail with raw and polished text and metadata", () => {
     const entry: HistoryEntry = {
       id: 101,
-      uuid: "123e4567-e89b-12d3-a456-426614174000",
+      capture_uuid: "123e4567-e89b-12d3-a456-426614174000",
       text: "Hello team, let's ship this.",
       raw_text: "hello team lets ship this",
       word_count: 5,
       duration_ms: 2500,
-      input_tokens: 15,
-      output_tokens: 8,
-      delivery_mode: "paste",
+      delivery_outcome: "pasted",
+      delivery_warning: null,
       created_at: 1788728580,
     };
 
@@ -40,7 +39,7 @@ describe("Frontend Modal Components", () => {
     render(<PrivacyNoticeModal open={true} onAccept={onAccept} returnFocusRef={ref} />);
 
     expect(screen.getByText("Privacy & Data Processing Notice")).toBeInTheDocument();
-    expect(screen.getByText("Exclusive Remote Provider (Groq)")).toBeInTheDocument();
+    expect(screen.getByText("Remote Provider (Groq Cloud API)")).toBeInTheDocument();
 
     const acceptButton = screen.getByRole("button", { name: /I Understand & Accept/i });
     await user.click(acceptButton);

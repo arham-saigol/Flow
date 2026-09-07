@@ -25,29 +25,37 @@ pub fn normalize_snippet_trigger(value: &str) -> Option<String> {
     let collapsed = lower.split_whitespace().collect::<Vec<_>>().join(" ");
 
     // Outer quotes and brackets
-    const OPEN_WRAPPERS: &[char] = &['"', '\'', '(', '[', '{', '“', '‘', '¿', '¡', '«', '‹', '「', '『'];
+    const OPEN_WRAPPERS: &[char] = &[
+        '"', '\'', '(', '[', '{', '“', '‘', '¿', '¡', '«', '‹', '「', '『',
+    ];
     const CLOSE_WRAPPERS: &[char] = &['"', '\'', ')', ']', '}', '”', '’', '»', '›', '」', '』'];
-    const SENTENCE_FINAL: &[char] = &['.', ',', '!', '?', ';', ':', '…', '。', '！', '？', '؟', '؛'];
+    const SENTENCE_FINAL: &[char] = &[
+        '.', ',', '!', '?', ';', ':', '…', '。', '！', '？', '؟', '؛',
+    ];
 
     let mut trimmed = collapsed.as_str();
 
     // Trim outer wrappers and sentence-final punctuation iteratively
     loop {
         let before_len = trimmed.len();
-        trimmed = trimmed.trim_start_matches(|c: char| c.is_whitespace() || OPEN_WRAPPERS.contains(&c));
-        
+        trimmed =
+            trimmed.trim_start_matches(|c: char| c.is_whitespace() || OPEN_WRAPPERS.contains(&c));
+
         // Strip leading sentence-final punctuation UNLESS it's a '.' followed immediately by an alphanumeric (e.g. .NET)
         let mut chars = trimmed.chars();
         if let Some(first) = chars.next() {
             if SENTENCE_FINAL.contains(&first) {
-                let is_dot_identifier = first == '.' && chars.next().map(|c| c.is_alphanumeric()).unwrap_or(false);
+                let is_dot_identifier =
+                    first == '.' && chars.next().map(|c| c.is_alphanumeric()).unwrap_or(false);
                 if !is_dot_identifier {
                     trimmed = &trimmed[first.len_utf8()..];
                 }
             }
         }
 
-        trimmed = trimmed.trim_end_matches(|c: char| c.is_whitespace() || CLOSE_WRAPPERS.contains(&c) || SENTENCE_FINAL.contains(&c));
+        trimmed = trimmed.trim_end_matches(|c: char| {
+            c.is_whitespace() || CLOSE_WRAPPERS.contains(&c) || SENTENCE_FINAL.contains(&c)
+        });
         if trimmed.len() == before_len {
             break;
         }
@@ -139,67 +147,73 @@ pub fn filter_conflicting_corrections(
     (valid, conflicts)
 }
 
+fn match_at(text: &str, start_byte: usize, rule_norm: &str) -> Option<usize> {
+    let first_rule_char = rule_norm.chars().next()?;
+    if is_word_continuation(first_rule_char) && start_byte > 0 {
+        let prev_char = text[..start_byte].chars().next_back()?;
+        if is_word_continuation(prev_char) {
+            return None;
+        }
+    }
+
+    let mut text_chars = text[start_byte..].char_indices().peekable();
+    let mut rule_chars = rule_norm.chars().peekable();
+    let mut last_matched_end = 0;
+
+    while let Some(&rule_c) = rule_chars.peek() {
+        if rule_c == ' ' {
+            let mut saw_ws = false;
+            while let Some(&(_, tc)) = text_chars.peek() {
+                if tc.is_whitespace() {
+                    saw_ws = true;
+                    let (idx, c) = text_chars.next().unwrap();
+                    last_matched_end = idx + c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if !saw_ws {
+                return None;
+            }
+            rule_chars.next();
+        } else {
+            let &(t_idx, tc) = text_chars.peek()?;
+            if tc.is_whitespace() {
+                return None;
+            }
+            let tc_norm: String = tc.to_lowercase().collect();
+            for norm_c in tc_norm.chars() {
+                if rule_chars.peek() == Some(&norm_c) {
+                    rule_chars.next();
+                } else {
+                    return None;
+                }
+            }
+            text_chars.next();
+            last_matched_end = t_idx + tc.len_utf8();
+        }
+    }
+
+    let last_rule_char = rule_norm.chars().next_back()?;
+    let matched_end_byte = start_byte + last_matched_end;
+    if is_word_continuation(last_rule_char) && matched_end_byte < text.len() {
+        let next_char = text[matched_end_byte..].chars().next()?;
+        if is_word_continuation(next_char) {
+            return None;
+        }
+    }
+
+    Some(matched_end_byte)
+}
+
 /// Applies validated dictionary corrections to original text.
-/// Uses word continuation boundaries and preserves case/formatting outside the replacement.
+/// Uses normalized-to-original byte span matching, collapsing whitespace only,
+/// preserving literal punctuation and formatting outside replacements.
 pub fn apply_corrections(text: &str, rules: &[ValidatedCorrection]) -> String {
     if text.is_empty() || rules.is_empty() {
         return text.to_string();
     }
 
-    // Build character map of original text:
-    // Each char in normalized text corresponds to an original byte span.
-    // However, Unicode lowercase/NFC can change character counts and byte lengths!
-    // To solve this accurately:
-    // We scan the original text, normalizing word windows or finding matching spans.
-    
-    // We can tokenize or scan `text` using word continuation boundaries.
-    // Since corrections are phrases (sequences of words), we extract tokens with their original byte offsets.
-    
-    #[derive(Debug, Clone)]
-    struct Token {
-        orig_start: usize,
-        orig_end: usize,
-        norm: String,
-        is_word: bool,
-    }
-
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut char_indices = text.char_indices().peekable();
-
-    while let Some(&(start, c)) = char_indices.peek() {
-        let is_word = is_word_continuation(c);
-        let mut end = start + c.len_utf8();
-        char_indices.next();
-
-        while let Some(&(next_idx, next_c)) = char_indices.peek() {
-            if is_word_continuation(next_c) == is_word {
-                end = next_idx + next_c.len_utf8();
-                char_indices.next();
-            } else {
-                break;
-            }
-        }
-
-        let slice = &text[start..end];
-        let norm = if is_word {
-            normalize_key(slice)
-        } else {
-            // For non-word tokens (spaces, punctuation), normalize whitespace
-            let nfc: String = slice.nfc().collect();
-            nfc.to_lowercase()
-        };
-
-        tokens.push(Token {
-            orig_start: start,
-            orig_end: end,
-            norm,
-            is_word,
-        });
-    }
-
-    // Find matches
-    // A match spans from token `i` to `j`.
-    // It must start and end on a word token (or a token sequence matching normalized_source).
     #[derive(Debug)]
     struct Match {
         orig_start: usize,
@@ -208,58 +222,22 @@ pub fn apply_corrections(text: &str, rules: &[ValidatedCorrection]) -> String {
         rule_len: usize,
     }
 
-    let mut matches: Vec<Match> = Vec::new();
+    let mut matches = Vec::new();
 
     for rule in rules {
-        let rule_tokens: Vec<&str> = rule.normalized_source.split_whitespace().collect();
-        if rule_tokens.is_empty() {
+        if rule.normalized_source.is_empty() {
             continue;
         }
 
-        // Try to match rule_tokens starting at token index i
-        let mut i = 0;
-        while i < tokens.len() {
-            // The starting token should be a word token whose norm matches rule_tokens[0]
-            if tokens[i].is_word && tokens[i].norm == rule_tokens[0] {
-                let mut matched = true;
-                let mut r_idx = 1;
-                let mut curr_token = i + 1;
-                let mut last_match_token = i;
-
-                while r_idx < rule_tokens.len() {
-                    // Skip whitespace/punctuation between words if rule has multiple words separated by space
-                    while curr_token < tokens.len() && !tokens[curr_token].is_word {
-                        curr_token += 1;
-                    }
-                    if curr_token < tokens.len() && tokens[curr_token].norm == rule_tokens[r_idx] {
-                        last_match_token = curr_token;
-                        curr_token += 1;
-                        r_idx += 1;
-                    } else {
-                        matched = false;
-                        break;
-                    }
-                }
-
-                if matched && r_idx == rule_tokens.len() {
-                    let orig_start = tokens[i].orig_start;
-                    let orig_end = tokens[last_match_token].orig_end;
-
-                    // Check boundary: previous char and next char in original text must not be word continuation
-                    let left_ok = orig_start == 0 || !text[..orig_start].chars().next_back().map(is_word_continuation).unwrap_or(false);
-                    let right_ok = orig_end == text.len() || !text[orig_end..].chars().next().map(is_word_continuation).unwrap_or(false);
-
-                    if left_ok && right_ok {
-                        matches.push(Match {
-                            orig_start,
-                            orig_end,
-                            replacement: rule.replacement.clone(),
-                            rule_len: rule.normalized_source.len(),
-                        });
-                    }
-                }
+        for (byte_idx, _) in text.char_indices() {
+            if let Some(end_byte) = match_at(text, byte_idx, &rule.normalized_source) {
+                matches.push(Match {
+                    orig_start: byte_idx,
+                    orig_end: end_byte,
+                    replacement: rule.replacement.clone(),
+                    rule_len: rule.normalized_source.len(),
+                });
             }
-            i += 1;
         }
     }
 
@@ -271,13 +249,11 @@ pub fn apply_corrections(text: &str, rules: &[ValidatedCorrection]) -> String {
             .then_with(|| (b.orig_end - b.orig_start).cmp(&(a.orig_end - a.orig_start)))
     });
 
-    // Select non-overlapping matches left-to-right
     let mut result = String::with_capacity(text.len());
     let mut last_idx = 0;
 
     for m in matches {
         if m.orig_start < last_idx {
-            // Overlaps with an already selected match
             continue;
         }
         result.push_str(&text[last_idx..m.orig_start]);
@@ -312,7 +288,10 @@ mod tests {
 
     #[test]
     fn test_normalize_snippet_trigger() {
-        assert_eq!(normalize_snippet_trigger("  My   EMAIL address... "), Some("my email address".into()));
+        assert_eq!(
+            normalize_snippet_trigger("  My   EMAIL address... "),
+            Some("my email address".into())
+        );
         assert_eq!(normalize_snippet_trigger("。状态؟"), Some("状态".into()));
         assert_eq!(normalize_snippet_trigger("C#"), Some("c#".into()));
         assert_eq!(normalize_snippet_trigger(".NET"), Some(".net".into()));
@@ -344,20 +323,11 @@ mod tests {
             "Please, Forward now."
         );
         // Boundary check: "four words" should not match "four word"
-        assert_eq!(
-            apply_corrections("four words", &rules),
-            "four words"
-        );
+        assert_eq!(apply_corrections("four words", &rules), "four words");
         // Underscore is a word continuation: "my_c_project" -> "c" inside identifier should not match
-        assert_eq!(
-            apply_corrections("my_c_project", &rules),
-            "my_c_project"
-        );
+        assert_eq!(apply_corrections("my_c_project", &rules), "my_c_project");
         // Standalone "c" matches
-        assert_eq!(
-            apply_corrections("a c project", &rules),
-            "a see project"
-        );
+        assert_eq!(apply_corrections("a c project", &rules), "a see project");
     }
 
     #[test]
@@ -371,5 +341,60 @@ mod tests {
         assert_eq!(conflicts, vec!["btw".to_string()]);
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0].normalized_source, "c sharp");
+    }
+
+    #[test]
+    fn test_probe_26_and_27_literal_corrections() {
+        let rules = vec![
+            ValidatedCorrection {
+                normalized_source: normalize_key("C#"),
+                replacement: "CSharp".into(),
+            },
+            ValidatedCorrection {
+                normalized_source: normalize_key(".NET"),
+                replacement: "DotNet".into(),
+            },
+            ValidatedCorrection {
+                normalized_source: normalize_key("don't"),
+                replacement: "do not".into(),
+            },
+            ValidatedCorrection {
+                normalized_source: normalize_key("foo-bar"),
+                replacement: "foobar".into(),
+            },
+            ValidatedCorrection {
+                normalized_source: normalize_key("four word"),
+                replacement: "forward".into(),
+            },
+        ];
+
+        // Probe 26: literal sources C#, .NET, don't, foo-bar match identical input
+        assert_eq!(
+            apply_corrections("I write C# code.", &rules),
+            "I write CSharp code."
+        );
+        assert_eq!(
+            apply_corrections("Using .NET framework.", &rules),
+            "Using DotNet framework."
+        );
+        assert_eq!(
+            apply_corrections("Please don't do that.", &rules),
+            "Please do not do that."
+        );
+        assert_eq!(
+            apply_corrections("Testing foo-bar here.", &rules),
+            "Testing foobar here."
+        );
+
+        // Probe 27: four, word must NOT match four word
+        assert_eq!(
+            apply_corrections("Look at four, word here.", &rules),
+            "Look at four, word here."
+        );
+        // But four word matches
+        assert_eq!(
+            apply_corrections("Look at four word here.", &rules),
+            "Look at forward here."
+        );
     }
 }

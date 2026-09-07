@@ -64,6 +64,8 @@ export const api = {
   cancelProcessing: () => invokeCommand<void>("cancel_processing"),
   retryPendingDictation: (id: number) =>
     invokeCommand<void>("retry_pending_dictation", { id }),
+  retryPendingTranscription: (id: number) =>
+    invokeCommand<void>("retry_pending_transcription", { id }),
   deletePendingDictation: (id: number) =>
     invokeCommand<void>("delete_pending_dictation", { id }),
   startShortcutCapture: () => invokeCommand<void>("start_shortcut_capture"),
@@ -73,5 +75,7 @@ export const api = {
   stopMicrophoneTest: () => invokeCommand<void>("stop_microphone_test"),
   acceptPendingTranscript: (id: number) =>
     invokeCommand<void>("accept_pending_transcript", { id }),
+  acknowledgePrivacyNotice: (version: number) =>
+    invokeCommand<void>("acknowledge_privacy_notice", { version }),
   exportDiagnostics: () => invokeCommand<string>("export_diagnostics"),
 };

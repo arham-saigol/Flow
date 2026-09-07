@@ -12,9 +12,10 @@ pub const RECOVERY_RETENTION_DAYS: u32 = 7;
 pub const MAX_RECOVERY_ITEMS: usize = 100;
 pub const MAX_RECOVERY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Keybind {
     #[serde(rename = "Right Alt")]
+    #[default]
     RightAlt,
     #[serde(rename = "Left Alt")]
     LeftAlt,
@@ -30,12 +31,6 @@ pub enum Keybind {
     F11,
     #[serde(rename = "F12")]
     F12,
-}
-
-impl Default for Keybind {
-    fn default() -> Self {
-        Self::RightAlt
-    }
 }
 
 impl std::fmt::Display for Keybind {
@@ -70,22 +65,17 @@ impl std::str::FromStr for Keybind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum HistoryRetention {
     #[serde(rename = "24 hours")]
     TwentyFourHours,
     #[serde(rename = "7 days")]
     SevenDays,
     #[serde(rename = "30 days")]
+    #[default]
     ThirtyDays,
     #[serde(rename = "Forever")]
     Forever,
-}
-
-impl Default for HistoryRetention {
-    fn default() -> Self {
-        Self::ThirtyDays
-    }
 }
 
 impl std::fmt::Display for HistoryRetention {
@@ -269,6 +259,12 @@ pub struct AppConfig {
     pub max_recovery_bytes: u64,
     pub supported_keybinds: Vec<String>,
     pub supported_retentions: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_expires_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allocated_recovery_bytes: Option<u64>,
 }
 
 impl Default for AppConfig {
@@ -301,6 +297,9 @@ impl Default for AppConfig {
                 "30 days".into(),
                 "Forever".into(),
             ],
+            backup_file: None,
+            backup_expires_at: None,
+            allocated_recovery_bytes: None,
         }
     }
 }
