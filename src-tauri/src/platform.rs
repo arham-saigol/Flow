@@ -1,14 +1,14 @@
 use std::{
     mem::size_of,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering},
         mpsc, Arc, Condvar, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant},
 };
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use windows::{
     core::{w, PCWSTR},
     Win32::{
@@ -32,8 +32,8 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL, VK_ESCAPE,
-                VK_LWIN, VK_MENU, VK_RETURN, VK_RWIN, VK_SHIFT,
+                KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_CONTROL, VK_ESCAPE,
+                VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
             },
             Shell::{DefSubclassProc, SetWindowSubclass},
             WindowsAndMessaging::{
@@ -71,24 +71,46 @@ static CLIPBOARD_RENDER_STATE: Mutex<Option<ClipboardRenderState>> = Mutex::new(
 static CLIPBOARD_RENDERED: Condvar = Condvar::new();
 static CLIPBOARD_RENDER_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 
-#[derive(Debug, Clone, Copy)]
+static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
+static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static CAPTURING_SHORTCUT: AtomicBool = AtomicBool::new(false);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetWindow {
-    hwnd: isize,
+    pub hwnd: isize,
     pub cursor_x: i32,
     pub cursor_y: i32,
+    pub pid: u32,
+    pub session_id: u64,
 }
 
 unsafe impl Send for TargetWindow {}
 unsafe impl Sync for TargetWindow {}
 
+pub fn cache_flow_hwnds(main_hwnd: isize, overlay_hwnd: isize) {
+    MAIN_HWND.store(main_hwnd, Ordering::Release);
+    OVERLAY_HWND.store(overlay_hwnd, Ordering::Release);
+}
+
 pub fn capture_target() -> TargetWindow {
+    capture_target_with_session(0)
+}
+
+pub fn capture_target_with_session(session_id: u64) -> TargetWindow {
     unsafe {
         let mut point = POINT::default();
         let _ = GetCursorPos(&mut point);
+        let hwnd = GetForegroundWindow();
+        let mut pid = 0u32;
+        if !hwnd.0.is_null() {
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        }
         TargetWindow {
-            hwnd: GetForegroundWindow().0 as isize,
+            hwnd: hwnd.0 as isize,
             cursor_x: point.x,
             cursor_y: point.y,
+            pid,
+            session_id,
         }
     }
 }
@@ -103,11 +125,20 @@ pub fn remember_target() {
     }
 }
 
+#[allow(dead_code)]
 pub fn remembered_target() -> Option<TargetWindow> {
     LAST_TARGET.lock().ok().and_then(|target| *target)
 }
 
 fn is_flow_window(hwnd: isize) -> bool {
+    let main = MAIN_HWND.load(Ordering::Acquire);
+    let overlay = OVERLAY_HWND.load(Ordering::Acquire);
+    if main != 0 && hwnd == main {
+        return true;
+    }
+    if overlay != 0 && hwnd == overlay {
+        return true;
+    }
     APP.get().is_some_and(|app| {
         ["main", "overlay"].iter().any(|label| {
             app.get_webview_window(label)
@@ -135,6 +166,14 @@ pub fn configure_keybind(keybind: &str) {
 
 pub fn set_recording(recording: bool) {
     RECORDING.store(recording, Ordering::Release);
+}
+
+pub fn start_shortcut_capture() {
+    CAPTURING_SHORTCUT.store(true, Ordering::Release);
+}
+
+pub fn cancel_shortcut_capture() {
+    CAPTURING_SHORTCUT.store(false, Ordering::Release);
 }
 
 pub fn install_keyboard_hook(app: AppHandle) -> Result<()> {
@@ -271,6 +310,37 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
         }
     }
 
+    if CAPTURING_SHORTCUT.load(Ordering::Acquire) {
+        if key_down {
+            if vk == VK_ESCAPE.0 as u32 {
+                CAPTURING_SHORTCUT.store(false, Ordering::Release);
+                if let Some(app) = APP.get() {
+                    let _ = app.emit("shortcut-capture-cancelled", ());
+                }
+                return LRESULT(1);
+            }
+            let keybind = match vk {
+                0xA5 => Some("Right Alt"),
+                0xA4 => Some("Left Alt"),
+                0xA3 => Some("Right Ctrl"),
+                0x77 => Some("F8"),
+                0x78 => Some("F9"),
+                0x79 => Some("F10"),
+                0x7A => Some("F11"),
+                0x7B => Some("F12"),
+                _ => None,
+            };
+            if let Some(name) = keybind {
+                CAPTURING_SHORTCUT.store(false, Ordering::Release);
+                if let Some(app) = APP.get() {
+                    let _ = app.emit("shortcut-captured", serde_json::json!({ "keybind": name }));
+                }
+                return LRESULT(1);
+            }
+        }
+        return LRESULT(1);
+    }
+
     if vk == VK_ESCAPE.0 as u32 && RECORDING.load(Ordering::Acquire) {
         if key_down && SELECTED_KEY_DOWN.load(Ordering::Acquire) {
             SELECTED_KEY_CHORDED.store(true, Ordering::Release);
@@ -396,30 +466,39 @@ pub fn prepare_overlay(app: &AppHandle, target: TargetWindow) -> Result<()> {
         .map_err(|error| FlowError::Windows(format!("Could not show the dictation bar: {error}")))
 }
 
-pub fn paste_text(target: TargetWindow, text: &str) -> Result<()> {
+pub fn paste_text(target: TargetWindow, text: &str) -> Result<&'static str> {
     if text.is_empty() {
-        return Ok(());
+        return Ok("copied");
     }
     let target_hwnd = HWND(target.hwnd as *mut _);
     unsafe {
         if target.hwnd == 0 || !IsWindow(target_hwnd).as_bool() {
-            return Err(FlowError::Windows(
-                "The application selected when dictation ended is no longer open.".into(),
-            ));
+            copy_text(text)?;
+            return Ok("copied");
+        }
+        let mut current_pid = 0u32;
+        GetWindowThreadProcessId(target_hwnd, Some(&mut current_pid));
+        if target.pid != 0 && current_pid != target.pid {
+            copy_text(text)?;
+            return Ok("copied");
         }
         if !SetForegroundWindow(target_hwnd).as_bool() {
-            return Err(FlowError::Windows(
-                "Flow could not focus the application selected when dictation ended.".into(),
-            ));
+            copy_text(text)?;
+            return Ok("copied");
         }
         thread::sleep(Duration::from_millis(24));
         if GetForegroundWindow().0 != target_hwnd.0 {
-            return Err(FlowError::Windows(
-                "The application selected when dictation ended did not gain focus.".into(),
-            ));
+            copy_text(text)?;
+            return Ok("copied");
         }
     }
-    paste_via_clipboard(target_hwnd, text)
+    match paste_via_clipboard(target_hwnd, text) {
+        Ok(()) => Ok("pasted"),
+        Err(_) => {
+            copy_text(text)?;
+            Ok("copied")
+        }
+    }
 }
 
 pub fn copy_text(text: &str) -> Result<()> {
@@ -553,17 +632,9 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
         }
 
         let Some(original) = prepare_temporary_clipboard(target, text)? else {
-            if GetForegroundWindow().0 != target.0 {
-                return Err(FlowError::Windows(
-                    "The dictation target lost focus before Flow could type.".into(),
-                ));
-            }
-            if text.contains(['\r', '\n']) {
-                return Err(FlowError::Windows(
-                    "Flow could not safely preserve the clipboard, so it did not type multiline text. Open Flow to retry or copy the recovered dictation.".into(),
-                ));
-            }
-            return send_unicode(text);
+            return Err(FlowError::Windows(
+                "Flow could not safely preserve the clipboard. Recovered dictation copied instead.".into(),
+            ));
         };
         let paste_result = (|| {
             if GetForegroundWindow().0 != target.0 {
@@ -578,8 +649,6 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
             }
             send_armed_paste_shortcut()?;
             wait_for_temporary_clipboard_request(Duration::from_secs(5))?;
-            // WM_RENDERFORMAT confirms that the target requested the text. Give
-            // GetClipboardData a short grace period to copy the rendered handle.
             thread::sleep(Duration::from_millis(50));
             Ok(())
         })();
@@ -1108,46 +1177,6 @@ unsafe fn send_paste_shortcut() -> Result<()> {
         "Windows accepted {inserted} of {} paste shortcut events. {cleanup_status}",
         inputs.len()
     )))
-}
-
-unsafe fn send_unicode(text: &str) -> Result<()> {
-    const INPUTS_PER_CHUNK: usize = 128;
-
-    let mut inputs = Vec::with_capacity(text.encode_utf16().count() * 2);
-    let mut characters = text.chars().peekable();
-    while let Some(character) = characters.next() {
-        if character == '\r' {
-            if characters.peek() == Some(&'\n') {
-                characters.next();
-            }
-            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
-        } else if character == '\n' {
-            inputs.push(key_input(VK_RETURN.0, 0, KEYBD_EVENT_FLAGS(0)));
-            inputs.push(key_input(VK_RETURN.0, 0, KEYEVENTF_KEYUP));
-        } else {
-            let mut encoded = [0_u16; 2];
-            for unit in character.encode_utf16(&mut encoded) {
-                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE));
-                inputs.push(key_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
-            }
-        }
-    }
-
-    for chunk in inputs.chunks(INPUTS_PER_CHUNK) {
-        let mut sent = 0;
-        while sent < chunk.len() {
-            let inserted = SendInput(&chunk[sent..], size_of::<INPUT>() as i32) as usize;
-            if inserted == 0 {
-                return Err(FlowError::Windows(format!(
-                    "Windows accepted {sent} of {} keyboard input events in the current chunk.",
-                    chunk.len()
-                )));
-            }
-            sent += inserted;
-        }
-    }
-    Ok(())
 }
 
 unsafe fn send_inputs(inputs: &[INPUT]) -> Result<()> {

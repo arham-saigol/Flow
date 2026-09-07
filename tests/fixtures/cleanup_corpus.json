@@ -1,0 +1,332 @@
+[
+  {
+    "id": 1,
+    "category": "technical",
+    "raw": "const x equals forty two semicolon",
+    "description": "Basic variable declaration with words"
+  },
+  {
+    "id": 2,
+    "category": "technical",
+    "raw": "async function fetch user data open parenthesis user id colon string close parenthesis",
+    "description": "TypeScript function signature"
+  },
+  {
+    "id": 3,
+    "category": "technical",
+    "raw": "select star from users where email equals test at example dot com",
+    "description": "SQL query with email"
+  },
+  {
+    "id": 4,
+    "category": "technical",
+    "raw": "we are building this service using dot net eight and c sharp twelve",
+    "description": ".NET and C# naming"
+  },
+  {
+    "id": 5,
+    "category": "technical",
+    "raw": "the client is written in c plus plus twenty",
+    "description": "C++ naming"
+  },
+  {
+    "id": 6,
+    "category": "technical",
+    "raw": "deploy the docker container to our kubernetes cluster on aws",
+    "description": "Cloud infrastructure terms"
+  },
+  {
+    "id": 7,
+    "category": "technical",
+    "raw": "configure oauth two dot zero authentication with jwt tokens",
+    "description": "OAuth and JWT security terms"
+  },
+  {
+    "id": 8,
+    "category": "technical",
+    "raw": "migrate the postgresql database to the latest schema version",
+    "description": "PostgreSQL database term"
+  },
+  {
+    "id": 9,
+    "category": "technical",
+    "raw": "npm install dash dash save dev vitest and typescript",
+    "description": "Command line syntax with flags"
+  },
+  {
+    "id": 10,
+    "category": "technical",
+    "raw": "git checkout dash b feature slash auth overhaul",
+    "description": "Git branch command"
+  },
+  {
+    "id": 11,
+    "category": "filler_removal",
+    "raw": "um so like I was thinking we should uh schedule the meeting for tomorrow",
+    "description": "Spoken fillers um, like, uh"
+  },
+  {
+    "id": 12,
+    "category": "filler_removal",
+    "raw": "you know the the server kind of crashed during peak traffic",
+    "description": "Stutter and conversational fillers"
+  },
+  {
+    "id": 13,
+    "category": "filler_removal",
+    "raw": "I mean basically it's just a simple api call right",
+    "description": "Hedge phrases"
+  },
+  {
+    "id": 14,
+    "category": "filler_removal",
+    "raw": "er well let me double check the logs first",
+    "description": "Hesitation marker er"
+  },
+  {
+    "id": 15,
+    "category": "filler_removal",
+    "raw": "uh uh yeah that looks totally fine to me",
+    "description": "Repeated hesitations"
+  },
+  {
+    "id": 16,
+    "category": "self_correction",
+    "raw": "send this report to Bob no sorry send it to Alice",
+    "description": "Recipient self-correction"
+  },
+  {
+    "id": 17,
+    "category": "self_correction",
+    "raw": "let's meet at two pm wait actually three thirty is better",
+    "description": "Time self-correction"
+  },
+  {
+    "id": 18,
+    "category": "self_correction",
+    "raw": "we will need five servers scratch that make it ten servers",
+    "description": "Quantity self-correction"
+  },
+  {
+    "id": 19,
+    "category": "self_correction",
+    "raw": "the bug is in the login component I mean the signup component",
+    "description": "Technical self-correction"
+  },
+  {
+    "id": 20,
+    "category": "self_correction",
+    "raw": "please review pr four hundred no four hundred and two",
+    "description": "PR number self-correction"
+  },
+  {
+    "id": 21,
+    "category": "dictation_command",
+    "raw": "hello team new line here is the weekly status update period",
+    "description": "New line and period commands"
+  },
+  {
+    "id": 22,
+    "category": "dictation_command",
+    "raw": "first item comma second item comma and third item period",
+    "description": "Comma and period dictation commands"
+  },
+  {
+    "id": 23,
+    "category": "dictation_command",
+    "raw": "are we ready for the release question mark new paragraph let me know period",
+    "description": "Question mark and new paragraph"
+  },
+  {
+    "id": 24,
+    "category": "dictation_command",
+    "raw": "open quote ship it exclamation mark close quote",
+    "description": "Quotes and exclamation mark"
+  },
+  {
+    "id": 25,
+    "category": "dictation_command",
+    "raw": "item one colon high priority semicolon item two colon normal priority",
+    "description": "Colon and semicolon formatting"
+  },
+  {
+    "id": 26,
+    "category": "numbers_dates_currency",
+    "raw": "the total cost came out to twenty five dollars and fifty cents",
+    "description": "Dollar and cents formatting"
+  },
+  {
+    "id": 27,
+    "category": "numbers_dates_currency",
+    "raw": "we are launching on July fourth twenty twenty four",
+    "description": "Date formatting"
+  },
+  {
+    "id": 28,
+    "category": "numbers_dates_currency",
+    "raw": "revenue increased by fifteen percent quarter over quarter",
+    "description": "Percentage formatting"
+  },
+  {
+    "id": 29,
+    "category": "numbers_dates_currency",
+    "raw": "my phone number is five five five zero one nine nine",
+    "description": "Phone number formatting"
+  },
+  {
+    "id": 30,
+    "category": "numbers_dates_currency",
+    "raw": "the latency dropped from one hundred and twenty milliseconds to twelve milliseconds",
+    "description": "Metrics and units formatting"
+  },
+  {
+    "id": 31,
+    "category": "formatting_casing",
+    "raw": "hey Sarah thanks for sending the design files over",
+    "description": "Proper nouns and greeting capitalization"
+  },
+  {
+    "id": 32,
+    "category": "formatting_casing",
+    "raw": "the quick brown fox jumps over the lazy dog",
+    "description": "Standard sentence capitalization and period"
+  },
+  {
+    "id": 33,
+    "category": "formatting_casing",
+    "raw": "is this pull request ready for merge",
+    "description": "Interrogative sentence question mark"
+  },
+  {
+    "id": 34,
+    "category": "formatting_casing",
+    "raw": "wow that was fast",
+    "description": "Exclamatory sentence"
+  },
+  {
+    "id": 35,
+    "category": "formatting_casing",
+    "raw": "don't forget to push your changes to origin main",
+    "description": "Contractions and branch casing"
+  },
+  {
+    "id": 36,
+    "category": "multi_sentence",
+    "raw": "good morning everyone I hope you had a great weekend our sprint planning is at ten am please make sure your tickets are up to date",
+    "description": "Multiple connected sentences needing punctuation"
+  },
+  {
+    "id": 37,
+    "category": "multi_sentence",
+    "raw": "we noticed an increase in errors around noon we rolled back the latest deploy and things are stable now",
+    "description": "Incident update narrative"
+  },
+  {
+    "id": 38,
+    "category": "multi_sentence",
+    "raw": "thanks for the quick turnaround on this looks great to me let's get it merged",
+    "description": "Code review praise and decision"
+  },
+  {
+    "id": 39,
+    "category": "multi_sentence",
+    "raw": "can you send me the api documentation also what credentials should I use",
+    "description": "Two consecutive questions"
+  },
+  {
+    "id": 40,
+    "category": "multi_sentence",
+    "raw": "I reviewed the PR everything looks solid except for one small typo on line forty two",
+    "description": "Review comment with line reference"
+  },
+  {
+    "id": 41,
+    "category": "technical",
+    "raw": "the json payload has status code two hundred and ok message",
+    "description": "HTTP response terminology"
+  },
+  {
+    "id": 42,
+    "category": "technical",
+    "raw": "run cargo check dash dash manifest dash path src dash tauri slash cargo dot toml",
+    "description": "Cargo command syntax"
+  },
+  {
+    "id": 43,
+    "category": "technical",
+    "raw": "use react query for server state management and zustand for client state",
+    "description": "Modern frontend ecosystem libraries"
+  },
+  {
+    "id": 44,
+    "category": "technical",
+    "raw": "tailwind css utility classes make styling fast and responsive",
+    "description": "Tailwind terminology"
+  },
+  {
+    "id": 45,
+    "category": "technical",
+    "raw": "tauri v2 allows native desktop apps with minimal memory footprint",
+    "description": "Tauri framework terminology"
+  },
+  {
+    "id": 46,
+    "category": "filler_removal",
+    "raw": "like basically I think you know we should just deploy it",
+    "description": "High density filler clusters"
+  },
+  {
+    "id": 47,
+    "category": "filler_removal",
+    "raw": "um uh um let's see what happens next",
+    "description": "Repeated um-uh hesitations"
+  },
+  {
+    "id": 48,
+    "category": "numbers_dates_currency",
+    "raw": "the invoice is for four thousand five hundred euros",
+    "description": "European currency formatting"
+  },
+  {
+    "id": 49,
+    "category": "numbers_dates_currency",
+    "raw": "meeting scheduled for Monday January fifteenth at nine thirty am",
+    "description": "Complex date and time string"
+  },
+  {
+    "id": 50,
+    "category": "dictation_command",
+    "raw": "step one colon clone the repository new line step two colon run npm install",
+    "description": "Numbered instructions with new lines"
+  },
+  {
+    "id": 51,
+    "category": "edge_cases",
+    "raw": "ok",
+    "description": "Short single word response"
+  },
+  {
+    "id": 52,
+    "category": "edge_cases",
+    "raw": "sounds good to me",
+    "description": "Short common colloquial agreement"
+  },
+  {
+    "id": 53,
+    "category": "edge_cases",
+    "raw": "yes",
+    "description": "Single affirmative word"
+  },
+  {
+    "id": 54,
+    "category": "edge_cases",
+    "raw": "no thanks",
+    "description": "Short polite decline"
+  },
+  {
+    "id": 55,
+    "category": "edge_cases",
+    "raw": "perfect see you tomorrow",
+    "description": "Closing sentence"
+  }
+]

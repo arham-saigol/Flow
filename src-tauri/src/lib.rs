@@ -1,19 +1,24 @@
 mod audio;
+pub mod clipboard_snapshot;
 mod credentials;
+pub mod diagnostics;
 mod database;
 mod error;
 mod groq;
 mod models;
 mod platform;
+pub mod recovery;
+pub mod text;
 pub mod workflow;
-
-use std::sync::atomic::AtomicBool;
 
 use audio::AudioRecorder;
 use database::Database;
 use error::{FlowError, Result};
 use groq::GroqClient;
-use models::{DashboardData, DictionaryEntry, Microphone, SettingsData, Snippet};
+use models::{
+    AppConfig, DashboardData, DictionaryEntry, HistoryEntry, Microphone, SettingsData, Snippet,
+    WorkflowStateSnapshot,
+};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -24,17 +29,85 @@ use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
 const TRAY_ID: &str = "flow-tray";
 
 pub struct AppState {
+    pub workflow: workflow::WorkflowCoordinator,
     pub database: Database,
     pub recorder: AudioRecorder,
     pub groq: GroqClient,
-    pub busy: AtomicBool,
-    pub processing: AtomicBool,
-    pub capture_limit_processing: AtomicBool,
+}
+
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<()> {
+    if window.label() != "main" {
+        return Err(FlowError::Unauthorized);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_workflow_state(state: State<'_, AppState>) -> Result<WorkflowStateSnapshot> {
+    Ok(state.workflow.snapshot())
+}
+
+#[tauri::command]
+fn get_app_config(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<AppConfig> {
+    require_main_window(&window)?;
+    Ok(state.database.app_config())
 }
 
 #[tauri::command]
 fn get_dashboard(state: State<'_, AppState>) -> Result<DashboardData> {
     state.database.dashboard()
+}
+
+#[tauri::command]
+fn get_history_page(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    limit: u32,
+    before_created_at: Option<i64>,
+    before_id: Option<i64>,
+) -> Result<Vec<HistoryEntry>> {
+    require_main_window(&window)?;
+    state
+        .database
+        .history_page(limit as usize, before_created_at, before_id)
+}
+
+#[tauri::command]
+fn delete_history_entry(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    state.database.delete_history_entry(id)
+}
+
+#[tauri::command]
+fn delete_all_history(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    delete_pending: bool,
+) -> Result<()> {
+    require_main_window(&window)?;
+    state.database.delete_all_history(delete_pending)
+}
+
+#[tauri::command]
+fn reset_statistics(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<()> {
+    require_main_window(&window)?;
+    state.database.reset_statistics()
+}
+
+#[tauri::command]
+fn delete_upgrade_backup(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Result<()> {
+    require_main_window(&window)?;
+    state.database.delete_upgrade_backup()
+}
+
+#[tauri::command]
+fn delete_api_key(window: tauri::WebviewWindow) -> Result<()> {
+    require_main_window(&window)?;
+    credentials::delete_api_key()
 }
 
 #[tauri::command]
@@ -44,27 +117,36 @@ fn list_dictionary(state: State<'_, AppState>) -> Result<Vec<DictionaryEntry>> {
 
 #[tauri::command]
 fn add_dictionary(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     value: String,
     correction: Option<String>,
 ) -> Result<DictionaryEntry> {
+    require_main_window(&window)?;
     state.database.add_dictionary(&value, correction.as_deref())
 }
 
 #[tauri::command]
 fn update_dictionary(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     id: i64,
     value: String,
     correction: Option<String>,
 ) -> Result<()> {
+    require_main_window(&window)?;
     state
         .database
         .update_dictionary(id, &value, correction.as_deref())
 }
 
 #[tauri::command]
-fn delete_dictionary(state: State<'_, AppState>, id: i64) -> Result<()> {
+fn delete_dictionary(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
     state.database.delete_dictionary(id)
 }
 
@@ -74,22 +156,35 @@ fn list_snippets(state: State<'_, AppState>) -> Result<Vec<Snippet>> {
 }
 
 #[tauri::command]
-fn add_snippet(state: State<'_, AppState>, trigger: String, content: String) -> Result<Snippet> {
+fn add_snippet(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    trigger: String,
+    content: String,
+) -> Result<Snippet> {
+    require_main_window(&window)?;
     state.database.add_snippet(&trigger, &content)
 }
 
 #[tauri::command]
 fn update_snippet(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     id: i64,
     trigger: String,
     content: String,
 ) -> Result<()> {
+    require_main_window(&window)?;
     state.database.update_snippet(id, &trigger, &content)
 }
 
 #[tauri::command]
-fn delete_snippet(state: State<'_, AppState>, id: i64) -> Result<()> {
+fn delete_snippet(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
     state.database.delete_snippet(id)
 }
 
@@ -100,11 +195,14 @@ fn get_settings(state: State<'_, AppState>) -> Result<SettingsData> {
 
 #[tauri::command]
 fn save_settings(
+    window: tauri::WebviewWindow,
     app: AppHandle,
     state: State<'_, AppState>,
     settings: SettingsData,
     api_key: Option<String>,
 ) -> Result<()> {
+    require_main_window(&window)?;
+
     let previous = state.database.settings(credentials::has_api_key())?;
     let autostart = app.autolaunch();
     if previous.launch_at_startup != settings.launch_at_startup {
@@ -133,13 +231,16 @@ fn save_settings(
     }
     if let Err(error) = state.database.save_settings(&settings) {
         if api_key.is_some() {
-            match previous_api_key {
-                Some(previous_key) => {
-                    let _ = credentials::save_api_key(&previous_key);
-                }
-                None => {
-                    let _ = credentials::delete_api_key();
-                }
+            let revert_result = match previous_api_key {
+                Some(ref previous_key) => credentials::save_api_key(previous_key),
+                None => credentials::delete_api_key(),
+            };
+            if let Err(revert_err) = revert_result {
+                let _ = set_autostart(&autostart, previous.launch_at_startup);
+                let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
+                return Err(FlowError::PartialSettingsSave(format!(
+                    "Settings failed to save ({error}), and API key could not be reverted ({revert_err})."
+                )));
             }
         }
         let _ = set_autostart(&autostart, previous.launch_at_startup);
@@ -171,7 +272,12 @@ fn list_microphones() -> Result<Vec<Microphone>> {
 }
 
 #[tauri::command]
-async fn test_api_key(state: State<'_, AppState>, api_key: String) -> Result<()> {
+async fn test_api_key(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    api_key: String,
+) -> Result<()> {
+    require_main_window(&window)?;
     state.groq.test_key(&api_key).await
 }
 
@@ -196,13 +302,74 @@ async fn retry_pending_dictation(app: AppHandle, id: i64) -> Result<()> {
 }
 
 #[tauri::command]
-fn delete_pending_dictation(state: State<'_, AppState>, id: i64) -> Result<()> {
-    state.database.delete_pending(id)
+fn delete_pending_dictation(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    workflow::discard_pending(&app, id)
 }
 
 #[tauri::command]
 fn cancel_recording(app: AppHandle) -> Result<()> {
     workflow::cancel(&app)
+}
+
+#[tauri::command]
+fn cancel_processing(app: AppHandle) -> Result<()> {
+    workflow::cancel(&app)
+}
+
+#[tauri::command]
+fn start_shortcut_capture(window: tauri::WebviewWindow) -> Result<()> {
+    require_main_window(&window)?;
+    platform::start_shortcut_capture();
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_shortcut_capture(window: tauri::WebviewWindow) -> Result<()> {
+    require_main_window(&window)?;
+    platform::cancel_shortcut_capture();
+    Ok(())
+}
+
+#[tauri::command]
+fn start_microphone_test(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    device_id: String,
+) -> Result<()> {
+    require_main_window(&window)?;
+    let state = app.state::<AppState>();
+    let session_id = state.workflow.next_session();
+    state.recorder.start_mic_test(session_id, app.clone(), &device_id)
+}
+
+#[tauri::command]
+fn stop_microphone_test(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    require_main_window(&window)?;
+    state.recorder.stop_mic_test(0)
+}
+
+#[tauri::command]
+fn accept_pending_transcript(
+    window: tauri::WebviewWindow,
+    app: AppHandle,
+    id: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    workflow::accept_pending_transcript(&app, id)
+}
+
+#[tauri::command]
+fn export_diagnostics(window: tauri::WebviewWindow) -> Result<String> {
+    require_main_window(&window)?;
+    Ok(diagnostics::export_diagnostics())
 }
 
 pub(crate) fn show_main(app: &AppHandle) {
@@ -271,21 +438,51 @@ pub fn run() {
                 .path()
                 .app_data_dir()
                 .map_err(|error| format!("Could not locate Flow's data folder: {error}"))?;
+            let _ = std::fs::create_dir_all(&data_dir);
+            let log_dir = data_dir.join("logs");
+            diagnostics::DiagnosticsLogger::init(&log_dir);
+
             let database = Database::open(&data_dir.join("flow.sqlite3"))?;
             let settings = database.settings(credentials::has_api_key())?;
             platform::configure_keybind(&settings.keybind);
             let groq = GroqClient::new()?;
+            let workflow = workflow::WorkflowCoordinator::new();
+
+            // Cache native HWNDs
+            let main_win = app.get_webview_window("main");
+            let overlay_win = app.get_webview_window("overlay");
+            if let (Some(m), Some(o)) = (main_win.as_ref(), overlay_win.as_ref()) {
+                if let (Ok(m_hwnd), Ok(o_hwnd)) = (m.hwnd(), o.hwnd()) {
+                    platform::cache_flow_hwnds(m_hwnd.0 as isize, o_hwnd.0 as isize);
+                }
+            }
+
+            // Recovery spools check & import on startup
+            let recovery_dir = data_dir.join("recovery");
+            let _ = recovery::scan_and_import_spools(&recovery_dir, &database);
+
             app.manage(AppState {
+                workflow,
                 database,
                 recorder: AudioRecorder::new(),
                 groq,
-                busy: AtomicBool::new(false),
-                processing: AtomicBool::new(false),
-                capture_limit_processing: AtomicBool::new(false),
             });
 
             create_tray(app, &settings.keybind)?;
             platform::install_keyboard_hook(app.handle().clone())?;
+
+            // Background hourly maintenance task (retention & quota cleanup)
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    let state = app_handle.state::<AppState>();
+                    let _ = state.database.run_maintenance(None);
+                }
+            });
+
             if std::env::args().any(|argument| argument == "--minimized") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -302,7 +499,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_workflow_state,
+            get_app_config,
             get_dashboard,
+            get_history_page,
+            delete_history_entry,
+            delete_all_history,
+            reset_statistics,
+            delete_upgrade_backup,
+            delete_api_key,
             list_dictionary,
             add_dictionary,
             update_dictionary,
@@ -319,8 +524,15 @@ pub fn run() {
             start_recording,
             stop_recording,
             cancel_recording,
+            cancel_processing,
             retry_pending_dictation,
             delete_pending_dictation,
+            start_shortcut_capture,
+            cancel_shortcut_capture,
+            start_microphone_test,
+            stop_microphone_test,
+            accept_pending_transcript,
+            export_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Flow");
@@ -328,22 +540,25 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::workflow;
+    use super::text;
 
     #[test]
     fn snippet_matching_normalizes_case_spacing_and_edge_punctuation() {
         assert_eq!(
-            workflow::normalize_utterance("  My   EMAIL address... "),
-            "my email address"
+            text::normalize_snippet_trigger("  My   EMAIL address... "),
+            Some("my email address".to_string())
         );
-        assert_eq!(workflow::normalize_utterance("。状态؟"), "状态");
+        assert_eq!(
+            text::normalize_snippet_trigger("。状态؟"),
+            Some("状态".to_string())
+        );
     }
 
     #[test]
     fn snippet_matching_keeps_internal_words_exact() {
         assert_ne!(
-            workflow::normalize_utterance("insert my signature"),
-            workflow::normalize_utterance("insert signature")
+            text::normalize_snippet_trigger("insert my signature"),
+            text::normalize_snippet_trigger("insert signature")
         );
     }
 }

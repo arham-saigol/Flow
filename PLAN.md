@@ -1,28 +1,5 @@
 # Flow reliability audit and implementation plan
 
-## Scope and status
-
-Audit date: 2026-09-07. Baseline commit: `9b89f94`. The working tree was clean before this audit.
-
-This document is the implementation handoff. The audit and plan-revision tasks change only this file; they do not implement application changes. When the owner instructs another agent to implement this plan, that agent is authorized to change the source, tests, dependencies, configuration, and documentation specified here.
-
-Implement the fixed decisions and contracts below in the stated order. Do not treat the historical audit-only restriction as a restriction on that implementation task. Mark checklist items complete only after their changes and tests pass. If a required live-provider, hardware, signing, or release-owner check is unavailable, report that gate as blocked rather than inventing a pass or silently changing the design.
-
-Reviewed all first-party Rust, TypeScript, TSX, CSS, HTML, build scripts, manifests, capabilities, and README. Inventoried all 97 tracked files, including lockfiles, generated Tauri schemas, and packaged assets. Generated schemas are build output, not independently maintained application logic. This is not an audit of every line of every third-party dependency or a certification of Windows, WebView2, or Groq.
-
-The audit traced microphone capture, hotkeys, automatic stop, cancellation, transcription, cleanup, dictionary corrections, snippet matching, recovery, history, credentials, settings, clipboard delivery, overlay lifecycle, and startup/shutdown. Findings below distinguish code defects from release controls that are missing. Source line numbers refer to the baseline, not the eventual implementation.
-
-### Validation performed
-
-- `npm ci --ignore-scripts` succeeded. No dependency versions or lockfile entries were changed.
-- `npm run typecheck` passed.
-- `npm run build` passed with Vite 6.4.3.
-- `npm audit --json` reported one high-severity development dependency advisory, detailed in F32.
-- `cargo test --locked --manifest-path src-tauri/Cargo.toml` passed all 23 existing Rust tests. The first build took about seven minutes.
-- `cargo audit` is not installed in the audit environment. Rust advisory scanning remains a release gate, not a claimed pass.
-- No Groq requests containing audio or dictation were made. No saved credentials were read. Model compatibility was checked against public Groq documentation, not an authenticated account.
-- Real microphone, hotkey, clipboard, installer, suspension, and multi-monitor behavior still needs the Windows tests below. Code-path findings are not presented as completed device tests.
-
 ## Fixed product decisions
 
 Implement these decisions as written. Do not substitute another provider or silently change models.
@@ -52,21 +29,7 @@ Sources checked on the audit date:
 - https://console.groq.com/docs/speech-to-text
 - https://learn.microsoft.com/en-us/windows/win32/winmsg/lowlevelkeyboardproc
 
-## Requested provider and prompt changes
-
-### R01. Deepgram removal
-
-Deepgram is already absent from the current tracked source, manifests, lockfiles, settings types, credentials implementation, generated configuration, and README. The only provider credential target is `Flow/GroqApiKey`. Do not invent a Deepgram module or a speculative credential name to delete.
-
-Implementation steps:
-
-1. Before making provider changes, repeat a case-insensitive tracked-file search for `deepgram`, `api.deepgram.com`, `listen.deepgram`, `DEEPGRAM_API_KEY`, and `nova-2`/`nova-3`. Exclude this audit document from the zero-reference assertion.
-2. If the implementation branch introduces any such references after this baseline, remove the identified provider implementation, imports, settings, UI, dependencies, tests, and configuration. Regenerate lockfiles through their package managers, not by deleting arbitrary blocks.
-3. For this baseline, no Deepgram application deletion or database migration is needed. Do not delete generic settings, other applications' Windows credentials, or user environment variables.
-4. Document the final Groq-only data flow in README. Do not rewrite Git history.
-5. Add a CI source/config check for prohibited provider references, excluding this historical plan. No live Deepgram keys or network calls belong in tests.
-
-### R02. Exact Groq request contract
+### R01. Exact Groq request contract
 
 Files: `src-tauri/src/groq.rs`, especially lines 64-138; `models.rs`, `workflow.rs`, settings UI, and README where needed.
 
@@ -116,7 +79,7 @@ Bound both transcript fields to 32,000 UTF-8 bytes each. If a response exceeds t
 
 An opt-in release smoke test must send a synthetic cleanup fixture and a checked-in, non-sensitive speech fixture using a separately supplied test key. Assert exact model IDs, accepted reasoning settings, final text without reasoning, and successful Whisper transcription. If Groq rejects the request or the account lacks model access, block release and report the actual incompatibility. Do not fall back to Qwen 3.6, GPT-OSS, or another reasoning level.
 
-### R03. Final system prompt, verbatim
+### R02. Final system prompt, verbatim
 
 Store this as `src-tauri/prompts/dictation_cleanup.txt` and load it with `include_str!`. Use LF line endings and one trailing newline. A snapshot test must compare the complete text, not a few substrings.
 

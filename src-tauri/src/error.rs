@@ -4,6 +4,10 @@ use thiserror::Error;
 pub enum FlowError {
     #[error("{0}")]
     Message(String),
+    #[error("Item not found.")]
+    NotFound,
+    #[error("Flow is busy with another dictation.")]
+    Busy,
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
     #[error("Network error: {0}")]
@@ -20,6 +24,12 @@ pub enum FlowError {
     NotRecording,
     #[error("The recording was too short. Please try again.")]
     EmptyRecording,
+    #[error("Storage quota or disk space limit exceeded: {0}")]
+    QuotaExceeded(String),
+    #[error("Settings partially saved: {0}")]
+    PartialSettingsSave(String),
+    #[error("Unauthorized window caller.")]
+    Unauthorized,
 }
 
 impl serde::Serialize for FlowError {

@@ -15,7 +15,9 @@ import {
 import { api } from "./api";
 import { Logo } from "./components/Logo";
 import { SettingsModal } from "./components/SettingsModal";
+import { PrivacyNoticeModal } from "./components/PrivacyNoticeModal";
 import { Toast, type ToastData } from "./components/Toast";
+import { useWorkflowState } from "./hooks/useWorkflowState";
 import { Dashboard } from "./pages/Dashboard";
 import { Dictionary } from "./pages/Dictionary";
 import { Snippets } from "./pages/Snippets";
@@ -97,11 +99,15 @@ function TitleBar() {
 export default function App() {
   const [page, setPage] = useState<Page>("dashboard");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
   const [toast, setToast] = useState<ToastData | null>(null);
   const [dashboardVersion, setDashboardVersion] = useState(0);
   const [keybind, setKeybind] = useState("Right Alt");
   const toastTimer = useRef<number | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const privacyTriggerRef = useRef<HTMLElement>(null);
+
+  const workflow = useWorkflowState();
 
   const notify = useCallback((data: ToastData) => {
     if (toastTimer.current !== null) {
@@ -119,6 +125,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const hasSeenNotice = localStorage.getItem("flow_seen_privacy_notice") === "true";
+    if (!hasSeenNotice) {
+      setPrivacyOpen(true);
+    }
+
     if (!isTauri()) {
       return () => {
         if (toastTimer.current !== null) {
@@ -129,8 +140,15 @@ export default function App() {
 
     void api
       .settings()
-      .then((settings) => setKeybind(settings.keybind))
+      .then((settings) => {
+        setKeybind(settings.keybind);
+        if (settings.has_seen_privacy_notice) {
+          localStorage.setItem("flow_seen_privacy_notice", "true");
+          setPrivacyOpen(false);
+        }
+      })
       .catch((error) => notify({ kind: "error", message: String(error) }));
+
     const unlisten = listen<{ message: string }>("dictation-complete", (event) => {
       setDashboardVersion((version) => version + 1);
       notify({ kind: "success", message: event.payload.message });
@@ -151,6 +169,11 @@ export default function App() {
       }
     };
   }, [notify]);
+
+  const handleAcceptPrivacy = () => {
+    localStorage.setItem("flow_seen_privacy_notice", "true");
+    setPrivacyOpen(false);
+  };
 
   return (
     <div className="app-shell">
@@ -178,7 +201,7 @@ export default function App() {
               <span>Settings</span>
             </button>
             <div className="shortcut-hint">
-              <span>Start dictating</span>
+              <span>{workflow.isRecording ? "Recording…" : workflow.isProcessing ? "Polishing…" : "Start dictating"}</span>
               <kbd>{keybind}</kbd>
             </div>
           </div>
@@ -204,6 +227,13 @@ export default function App() {
           }}
         />
       )}
+
+      <PrivacyNoticeModal
+        open={privacyOpen}
+        onAccept={handleAcceptPrivacy}
+        returnFocusRef={privacyTriggerRef}
+      />
+
       {toast && <Toast data={toast} onClose={() => setToast(null)} />}
     </div>
   );
