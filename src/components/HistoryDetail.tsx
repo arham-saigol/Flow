@@ -78,7 +78,7 @@ export function HistoryDetail({
             </>
           )}
           {entry.delivery_warning && (
-            <div className="detail-tag detail-tag--warning flex items-center gap-1">
+            <div className="detail-tag detail-tag--warning">
               <AlertTriangle size={12} />
               <span>{entry.delivery_warning}</span>
             </div>

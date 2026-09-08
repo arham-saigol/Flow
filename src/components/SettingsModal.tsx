@@ -435,26 +435,24 @@ export function SettingsModal({
 
                   <div className="settings-form-grid">
                     <div className="field">
-                      <div className="flex items-center justify-between">
+                      <div className="field__header">
                         <span>Microphone</span>
-                        <div className="flex items-center gap-1">
+                        <div className="field__actions">
                           <button
                             type="button"
                             onClick={loadMicrophones}
                             title="Refresh microphones"
                             aria-label="Refresh microphone list"
-                            className="p-1 text-stone-500 hover:text-stone-800 rounded transition-colors"
+                            className="icon-button"
                           >
                             <RefreshCw size={13} />
                           </button>
                           <button
                             type="button"
                             onClick={() => void toggleMicTest()}
-                            className={`text-xs px-2 py-0.5 rounded border transition-colors ${
-                              testingMic
-                                ? "bg-amber-100 text-amber-900 border-amber-300 font-semibold"
-                                : "bg-white text-stone-600 border-stone-200 hover:bg-stone-50"
-                            }`}
+                            className={
+                              testingMic ? "mic-test-button is-active" : "mic-test-button"
+                            }
                           >
                             {testingMic ? "Stop Test" : "Test Mic"}
                           </button>
@@ -480,17 +478,17 @@ export function SettingsModal({
                         ))}
                       </select>
                       {testingMic && (
-                        <div className="mt-1.5 p-2 bg-stone-100/80 rounded-lg border border-stone-200/80 space-y-1">
-                          <div className="flex items-center justify-between text-[11px] text-stone-600">
-                            <span className="flex items-center gap-1">
-                              <Mic size={11} className="text-emerald-600 animate-pulse" />
+                        <div className="input-meter">
+                          <div className="input-meter__label">
+                            <span className="input-meter__title">
+                              <Mic size={11} />
                               Input Level
                             </span>
                             <span>{Math.round(micLevel * 100)}%</span>
                           </div>
-                          <div className="h-1.5 w-full bg-stone-200 rounded-full overflow-hidden">
+                          <div className="input-meter__track">
                             <div
-                              className="h-full bg-emerald-500 transition-all duration-75 rounded-full"
+                              className="input-meter__fill"
                               style={{ width: `${Math.min(100, micLevel * 100)}%` }}
                             />
                           </div>
@@ -552,11 +550,11 @@ export function SettingsModal({
                     </label>
 
                     {/* Data Management & Diagnostics */}
-                    <div className="field field--wide pt-2 border-t border-stone-200/80 space-y-2">
-                      <span className="font-medium text-stone-800 text-xs uppercase tracking-wider">
+                    <div className="field field--wide field--storage">
+                      <span className="storage-heading">
                         Storage & Diagnostics
                       </span>
-                      <div className="flex flex-wrap gap-2 pt-1">
+                      <div className="storage-actions">
                         <button
                           type="button"
                           className="secondary-button compact"
@@ -583,7 +581,7 @@ export function SettingsModal({
                         {appConfig?.backup_file && (
                           <button
                             type="button"
-                            className="secondary-button compact text-amber-800"
+                            className="secondary-button compact warning"
                             onClick={() => void handleDeleteUpgradeBackup()}
                           >
                             Delete Upgrade Backup
@@ -592,7 +590,7 @@ export function SettingsModal({
                         <button
                           ref={privacyButtonRef}
                           type="button"
-                          className="secondary-button compact text-stone-600"
+                          className="secondary-button compact muted"
                           onClick={() => setPrivacyOpen(true)}
                         >
                           <ShieldCheck size={13} />
@@ -633,7 +631,7 @@ export function SettingsModal({
                         </button>
                       </div>
                     </label>
-                    <div className="flex items-center gap-2">
+                    <div className="api-key-actions">
                       <button
                         className="secondary-button compact"
                         disabled={!apiKey || testing}
@@ -650,7 +648,7 @@ export function SettingsModal({
                       {settings.has_api_key && !confirmRemoveKey && (
                         <button
                           type="button"
-                          className="secondary-button compact text-red-700 hover:text-red-800 border-red-200"
+                          className="secondary-button compact danger"
                           onClick={() => setConfirmRemoveKey(true)}
                         >
                           Remove saved key
@@ -658,18 +656,18 @@ export function SettingsModal({
                       )}
 
                       {confirmRemoveKey && (
-                        <div className="flex items-center gap-1.5 p-1 bg-red-50 border border-red-200 rounded-lg">
-                          <span className="text-xs text-red-800 font-medium px-1">Confirm delete?</span>
+                        <div className="confirm-remove">
+                          <span className="confirm-remove__label">Confirm delete?</span>
                           <button
                             type="button"
-                            className="px-2 py-1 bg-red-600 text-white rounded text-xs font-semibold hover:bg-red-700"
+                            className="confirm-remove__confirm"
                             onClick={() => void handleRemoveApiKey()}
                           >
                             Yes, remove
                           </button>
                           <button
                             type="button"
-                            className="px-2 py-1 text-stone-600 rounded text-xs hover:bg-stone-200"
+                            className="confirm-remove__cancel"
                             onClick={() => setConfirmRemoveKey(false)}
                           >
                             Cancel
