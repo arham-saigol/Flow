@@ -8,9 +8,9 @@ PLAN.md has R01 and R02 headings but refers repeatedly to R03. Interpret its R03
 
 ## Evidence and limits
 
-- Passed: frontend typecheck, 11 Vitest tests, production frontend build, 17 Rust tests with `--locked`, npm audit with zero vulnerabilities. `npm ls nanoid` resolves 3.3.18.
+- Passed: frontend typecheck, 11 Vitest tests, production frontend build, 17 Rust tests with `--locked`, npm audit with zero vulnerabilities. `npm ls nanoid` resolves 3.3.18. These figures were recorded at the reviewed HEAD 7240fe2; the applied fix commits keep nanoid at 3.3.18 with `npm audit --audit-level=high` clean while raising the Rust suite above the baseline plan's 23 tests.
 - Failed: rustfmt check and Clippy with `--all-targets -- -D warnings`. Clippy reports seven errors, listed in task 24.
-- The Rust suite has 17 tests versus the baseline plan's 23. There are no backend workflow race, crash recovery, or mock HTTP integration suites. Passing tests do not establish the requested behavior.
+- The Rust suite has 17 tests at reviewed HEAD 7240fe2, below the baseline plan's 23; the applied fix commits raise it above that baseline. At 7240fe2 there were no backend workflow race, crash recovery, or mock HTTP integration suites. Passing tests do not establish the requested behavior.
 - No live Groq requests, recording, clipboard delivery, installer execution, or installed-profile database manipulation was performed. No Flow process was running when checked.
 - The referenced screenshot was not attached to the conversation available to the reviewer. A brief local-page DOM inspection occurred before the user prohibited browser/computer use. All such interaction stopped on that instruction. Native hang timing, rendered geometry, and taskbar behavior remain unverified on the affected instance.
 - Locations below refer to this HEAD. Use the named functions as anchors after edits.

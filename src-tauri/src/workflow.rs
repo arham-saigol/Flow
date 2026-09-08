@@ -97,6 +97,10 @@ impl WorkflowCoordinator {
         self.session_counter.fetch_add(1, Ordering::SeqCst)
     }
 
+    pub fn active_pending_id(&self) -> Option<i64> {
+        self.state.lock().unwrap().active_pending_id
+    }
+
     pub fn emit_state(&self, app: &AppHandle) {
         let snapshot = self.snapshot();
         let _ = app.emit("workflow-state", &snapshot);
@@ -218,16 +222,25 @@ pub fn start(app: &AppHandle) -> Result<()> {
             Ok(())
         }
         Err(err) => {
-            {
+            let abandoned_uuid = {
                 let mut wf = state.workflow.state.lock().unwrap();
                 if wf.session_id == Some(session_id) {
+                    let capture_uuid = wf.capture_uuid.take();
                     wf.phase = WorkflowPhase::Idle;
                     wf.session_id = None;
-                    wf.capture_uuid = None;
                     wf.spool = None;
                     wf.cancellation_token = None;
                     wf.revision = state.workflow.next_revision();
+                    capture_uuid
+                } else {
+                    None
                 }
+            };
+            // The queued Start consumed the RecoverySpool, so it is no longer
+            // reachable here; mark it cancelled and clean up by capture UUID so
+            // abandoned spool files cannot import as recovered dictations.
+            if let Some(uuid) = abandoned_uuid {
+                discard_abandoned_spool(app, &uuid);
             }
             platform::set_recording(false);
             state.workflow.emit_state(app);
@@ -376,14 +389,19 @@ async fn process_captured(
 
     // Task 7: Stop limit reached -> save as copy_only pending item for review, do not call Groq or paste
     if captured.limit_reached {
-        let _ = state.database.insert_pending_recording(
+        if let Err(e) = state.database.insert_pending_recording(
             &capture_uuid,
             &captured.wav,
             captured.duration_ms,
             true,
             Some("limit_reached"),
             "copy_only",
-        );
+        ) {
+            // Inform the user before the workflow transitions to Idle and the
+            // overlay hides; the capture would otherwise be lost silently.
+            report_error(app, e, Some(session_id));
+            return;
+        }
         {
             let mut wf = state.workflow.state.lock().unwrap();
             if wf.session_id == Some(session_id) {
@@ -424,7 +442,7 @@ async fn process_captured(
     let pending_id = match insert_res {
         Ok(id) => id,
         Err(e) => {
-            report_error(app, e);
+            report_error(app, e, Some(session_id));
             return;
         }
     };
@@ -441,7 +459,7 @@ async fn process_captured(
     emit_overlay(app, "analysing", Some("Analyzing"));
 
     if let Err(e) = run_pending(app, session_id, pending_id, Some(target), delivery_mode).await {
-        report_error(app, e);
+        report_error(app, e, Some(session_id));
     }
 }
 
@@ -510,10 +528,12 @@ async fn run_pending(
         // Suspect speech requires user acceptance. Stop here before cleanup/delivery.
         {
             let mut wf = state.workflow.state.lock().unwrap();
-            wf.phase = WorkflowPhase::Idle;
-            wf.active_pending_id = None;
-            wf.session_id = None;
-            wf.revision = state.workflow.next_revision();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
         }
         state.workflow.emit_state(app);
         hide_overlay(app);
@@ -583,10 +603,12 @@ async fn run_pending(
         // Pure hesitation filler words
         {
             let mut wf = state.workflow.state.lock().unwrap();
-            wf.phase = WorkflowPhase::Idle;
-            wf.active_pending_id = None;
-            wf.session_id = None;
-            wf.revision = state.workflow.next_revision();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
         }
         state.workflow.emit_state(app);
         hide_overlay(app);
@@ -662,11 +684,13 @@ async fn run_pending(
 
     {
         let mut wf = state.workflow.state.lock().unwrap();
-        wf.phase = WorkflowPhase::Idle;
-        wf.active_pending_id = None;
-        wf.session_id = None;
-        wf.cancellation_token = None;
-        wf.revision = state.workflow.next_revision();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Idle;
+            wf.active_pending_id = None;
+            wf.session_id = None;
+            wf.cancellation_token = None;
+            wf.revision = state.workflow.next_revision();
+        }
     }
     state.workflow.emit_state(app);
     hide_overlay(app);
@@ -704,7 +728,7 @@ pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = run_pending(&app_clone, session_id, id, None, "copy_only").await {
-            report_error(&app_clone, e);
+            report_error(&app_clone, e, Some(session_id));
         }
     });
     Ok(())
@@ -751,7 +775,7 @@ pub async fn retry_pending_transcription(app: &AppHandle, id: i64) -> Result<()>
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = run_retranscribe(&app_clone, session_id, id, wav).await {
-            report_error(&app_clone, e);
+            report_error(&app_clone, e, Some(session_id));
         }
     });
 
@@ -944,21 +968,52 @@ pub fn stop_mic_test(app: &AppHandle) -> Result<()> {
     res
 }
 
+/// Marks a no-longer-reachable capture spool as cancelled and removes its
+/// files. Used when the queued recorder Start consumed the RecoverySpool and
+/// the session then failed or was cancelled: the workflow state no longer owns
+/// the spool, so cleanup happens by capture UUID (marker first, data files
+/// next, marker removed only after the files are handled).
+fn discard_abandoned_spool(app: &AppHandle, capture_uuid: &str) {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return;
+    };
+    let recovery_dir = app_data.join("recovery");
+    let marker_path = recovery_dir.join(format!("{capture_uuid}.terminal.json"));
+    let pcm_path = recovery_dir.join(format!("{capture_uuid}.pcm.part"));
+    let meta_path = recovery_dir.join(format!("{capture_uuid}.json"));
+
+    let marker = recovery::TerminalMarker {
+        schema_version: 1,
+        capture_uuid: capture_uuid.to_string(),
+        created_at: recovery::now_secs(),
+        disposition: Disposition::Cancelled,
+    };
+    if let Ok(marker_json) = serde_json::to_string_pretty(&marker) {
+        let _ = recovery::write_sync_rename(&marker_path, marker_json.as_bytes());
+    }
+    let pcm_gone = std::fs::remove_file(&pcm_path).is_ok() || !pcm_path.exists();
+    let meta_gone = std::fs::remove_file(&meta_path).is_ok() || !meta_path.exists();
+    if pcm_gone && meta_gone {
+        let _ = std::fs::remove_file(&marker_path);
+    }
+}
+
 pub fn cancel(app: &AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
-    let (phase, session_id, spool, _cancel_token) = {
+    let (phase, session_id, spool, capture_uuid, _cancel_token) = {
         let mut wf = state.workflow.state.lock().unwrap();
         let phase = wf.phase;
         let session_id = wf.session_id;
         let spool = wf.spool.take();
         let cancel_token = wf.cancellation_token.clone();
+        let mut capture_uuid = None;
 
         match phase {
             WorkflowPhase::Starting | WorkflowPhase::Recording => {
+                capture_uuid = wf.capture_uuid.take();
                 wf.phase = WorkflowPhase::Idle;
                 wf.session_id = None;
                 wf.active_pending_id = None;
-                wf.capture_uuid = None;
                 wf.cancellation_token = None;
                 wf.revision = state.workflow.next_revision();
             }
@@ -974,7 +1029,7 @@ pub fn cancel(app: &AppHandle) -> Result<()> {
             _ => return Ok(()),
         }
 
-        (phase, session_id, spool, cancel_token)
+        (phase, session_id, spool, capture_uuid, cancel_token)
     };
 
     platform::set_recording(false);
@@ -988,6 +1043,11 @@ pub fn cancel(app: &AppHandle) -> Result<()> {
         if let Some(mut s) = spool {
             let _ = s.mark_terminal(Disposition::Cancelled);
             let _ = s.cleanup();
+        } else if let Some(uuid) = capture_uuid {
+            // The queued Start consumed the spool, so it is owned by the audio
+            // worker; tear it down by capture UUID after recorder.cancel has
+            // confirmed the worker can no longer write the files.
+            discard_abandoned_spool(app, &uuid);
         }
     }
 
@@ -996,16 +1056,8 @@ pub fn cancel(app: &AppHandle) -> Result<()> {
 
 pub fn discard_pending(app: &AppHandle, id: i64) -> Result<()> {
     let state = app.state::<AppState>();
-    {
-        let wf = state.workflow.state.lock().unwrap();
-        if wf.active_pending_id == Some(id) {
-            return Err(FlowError::Message(
-                "Cannot discard an active dictation.".into(),
-            ));
-        }
-    }
-
     let pending = state.database.pending_dictation(id)?;
+
     if let Some(uuid) = &pending.capture_uuid {
         if let Ok(app_data) = app.path().app_data_dir() {
             let recovery_dir = app_data.join("recovery");
@@ -1013,20 +1065,51 @@ pub fn discard_pending(app: &AppHandle, id: i64) -> Result<()> {
             let pcm_path = recovery_dir.join(format!("{uuid}.pcm.part"));
             let meta_path = recovery_dir.join(format!("{uuid}.json"));
 
+            // Before deleting the pending row, durably mark the spool as
+            // discarded so a crash cannot resurrect the audio as a new capture.
+            // If the marker cannot be persisted, keep the pending row.
             let marker = recovery::TerminalMarker {
                 schema_version: 1,
                 capture_uuid: uuid.clone(),
                 created_at: recovery::now_secs(),
                 disposition: Disposition::Discarded,
             };
-            if let Ok(marker_json) = serde_json::to_string_pretty(&marker) {
-                let _ = recovery::write_sync_rename(&marker_path, marker_json.as_bytes());
+            let marker_json = serde_json::to_string_pretty(&marker).map_err(|e| {
+                FlowError::Message(format!("Could not serialize the discard marker: {e}"))
+            })?;
+            recovery::write_sync_rename(&marker_path, marker_json.as_bytes())?;
+
+            // Reserve and delete the pending item while holding the workflow
+            // claim so retry_pending or run_pending cannot access the same ID
+            // concurrently.
+            {
+                let wf = state.workflow.state.lock().unwrap();
+                if wf.active_pending_id == Some(id) {
+                    return Err(FlowError::Message(
+                        "Cannot discard an active dictation.".into(),
+                    ));
+                }
+                state.database.delete_pending(id)?;
             }
-            let _ = std::fs::remove_file(pcm_path);
-            let _ = std::fs::remove_file(meta_path);
+
+            // Remove the data files, then the terminal marker only after the
+            // related spool files are handled; otherwise the marker stays and
+            // startup maintenance retries the cleanup instead of importing.
+            let pcm_gone = std::fs::remove_file(&pcm_path).is_ok() || !pcm_path.exists();
+            let meta_gone = std::fs::remove_file(&meta_path).is_ok() || !meta_path.exists();
+            if pcm_gone && meta_gone {
+                let _ = std::fs::remove_file(&marker_path);
+            }
+            return Ok(());
         }
     }
 
+    let wf = state.workflow.state.lock().unwrap();
+    if wf.active_pending_id == Some(id) {
+        return Err(FlowError::Message(
+            "Cannot discard an active dictation.".into(),
+        ));
+    }
     state.database.delete_pending(id)?;
     Ok(())
 }
@@ -1036,30 +1119,43 @@ pub fn accept_pending_transcript(app: &AppHandle, id: i64) -> Result<()> {
     state.database.accept_pending_transcript(id)?;
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        let _ = retry_pending(&app_clone, id).await;
+        // Surface retry failures (including Busy) to the user instead of
+        // silently dropping the accepted transcript.
+        if let Err(e) = retry_pending(&app_clone, id).await {
+            report_error(&app_clone, e, None);
+        }
     });
     Ok(())
 }
 
-pub fn report_error(app: &AppHandle, error: FlowError) {
+pub fn report_error(app: &AppHandle, error: FlowError, session_id: Option<u64>) {
     let state = app.state::<AppState>();
-    let session_id = {
+    let owns_session = {
         let mut wf = state.workflow.state.lock().unwrap();
-        let sid = wf.session_id;
-        wf.phase = WorkflowPhase::Idle;
-        wf.active_pending_id = None;
-        wf.session_id = None;
-        wf.revision = state.workflow.next_revision();
-        sid
+        let owns = match (session_id, wf.session_id) {
+            (Some(sid), Some(current)) => sid == current,
+            _ => false,
+        };
+        if owns {
+            wf.phase = WorkflowPhase::Idle;
+            wf.active_pending_id = None;
+            wf.session_id = None;
+            wf.revision = state.workflow.next_revision();
+        }
+        owns
     };
-
-    platform::set_recording(false);
-    state.workflow.emit_state(app);
-    hide_overlay(app);
 
     let msg = error.to_string();
     crate::diagnostics::log_event("error", session_id, None, &msg);
     let _ = app.emit("flow-error", MessagePayload { message: msg });
+
+    if !owns_session {
+        // A stale task must not overwrite a newer recording session's state.
+        return;
+    }
+    platform::set_recording(false);
+    state.workflow.emit_state(app);
+    hide_overlay(app);
 }
 
 pub fn report_audio_fault(app: &AppHandle, error: FlowError) {

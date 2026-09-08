@@ -450,6 +450,8 @@ Tests: unavailable app data directory, corrupt DB, newer schema, migration failu
 
 #### F32. Locked development dependency has a known advisory. P2
 
+Status at reviewed HEAD 7240fe2: the evidence below describes the audit-only baseline and is historical. At HEAD, `package-lock.json` resolves `nanoid@3.3.18` (through a narrowly scoped npm override declared in `package.json`), `npm ls nanoid` reports 3.3.18, and `npm audit --audit-level=high` passes with zero vulnerabilities. The advisory is remediated on this branch.
+
 Evidence: `package-lock.json`, lines 1927-1931, locks `nanoid@3.3.16`. `npm ls nanoid` resolves `vite@6.4.3 -> postcss@8.5.24 -> nanoid@3.3.16`. `npm audit` reports GHSA-2v37-7h3g-55p8, custom generators can loop indefinitely when size is zero, fixed at 3.3.18. This is a development dependency; the audit did not establish a remotely reachable production Flow exploit.
 
 Fix: update that transitive dependency to 3.3.18 within its compatible range using npm, commit the regenerated lockfile, and rerun `npm ci`, build, and audit. Do not use `npm audit fix --force` or broadly upgrade majors. If the parent dependency's range prevents resolution, add a narrowly scoped npm override for nanoid 3.3.18 and explain it in the dependency maintenance documentation. Remove the override once the parent resolves a fixed version itself.
@@ -457,6 +459,8 @@ Fix: update that transitive dependency to 3.3.18 within its compatible range usi
 Tests: `npm ls nanoid` shows a fixed version, `npm audit --audit-level=high` passes, and production build output is unchanged in behavior.
 
 #### F33. No automated release gates cover the failure paths above. P1
+
+Status at reviewed HEAD 7240fe2: partially open. `.github/workflows/ci.yml` now exists with a pinned Rust toolchain (1.94.0) and Node (`.node-version`), `npm ci`, typecheck, production build, Vitest, `npm audit --audit-level=high`, `cargo check`, and `cargo test` on Windows. Still missing and keeping this finding open: `--locked`/lockfile enforcement on the Rust jobs, Rust advisory scanning, secret scanning, dependency license reporting, and the signed-release pipeline.
 
 Evidence: no `.github/workflows`, frontend test configuration, or integration-test suite exists. Current Rust tests exercise database helpers, normalization, WAV headers, audibility, prompt fragments, and process-family enumeration, not operation races, HTTP contracts, native delivery failures, or React lifecycle behavior. Toolchains are described as "stable"/"20 or newer" rather than reproducible versions.
 
@@ -544,7 +548,7 @@ A genuinely interrupted, unmarked capture imports as partial=true, review_reason
 Add `get_workflow_state` and a `workflow-state` event. Both return the same serializable object:
 
 ```text
-revision: monotonically increasing u64 within this process
+revision: u64 that starts at a positive initial value and strictly increases with every committed state transition within this process
 session_id: nullable u64
 phase: idle | starting | recording | stopping | transcribing | cleaning | delivering | microphone_test | faulted | shutting_down
 active_pending_id: nullable i64
@@ -558,7 +562,7 @@ No credentials, native handles, window titles, or transcript content belong in t
 
 Derive can_start only from Idle plus successful privacy, credential, audio-health, and storage checks. can_stop is true only in Recording. can_cancel is true in Starting, Recording, Transcribing, and Cleaning, and in Delivering only before the input commit point. Stop/Cancel during Stopping is an accepted no-op because the owning stop already chose processing versus discard. Stale duplicate commands must not switch that choice. MicrophoneTest has a separate Stop test action, automatically stops on modal close/blur or after 30 seconds, and returns to Idle only after confirmed teardown. Its capture is never spooled or transmitted. Any native audio timeout enters Faulted. A guard may release ordinary completed/failed sessions to Idle but must not overwrite Faulted or ShuttingDown.
 
-Add explicit commands for `get_app_config`, shortcut capture begin/end, microphone refresh/test start/test stop, processing cancellation, credential status/removal, paged history/pending queries, history details/deletion/reset stats, and diagnostic export. Main-window authorization is mandatory. Keep command names mirrored centrally in `api.ts` and cover all argument serialization in tests. `get_app_config` includes model display IDs, supported enums, field/count limits, and recovery policy, never secret values.
+Add explicit commands for `get_app_config`, shortcut capture begin/end, microphone refresh/test start/test stop, processing cancellation, credential status/removal, paged history/pending queries, history details/deletion/reset stats, and diagnostic export. Authorize commands through an explicit per-command allowlist rather than a blanket main-window rule: the overlay label may invoke only `get_workflow_state` and receive the `workflow-state` subscription; every other command — including all commands in this section and all history, recovery, settings, credential, provider-test, and diagnostic operations — remains main-window-only. Keep command names mirrored centrally in `api.ts` and cover all argument serialization in tests. Add tests covering every sensitive command from both the main-window and the overlay label, asserting each allowlist decision. `get_app_config` includes model display IDs, supported enums, field/count limits, and recovery policy, never secret values.
 
 For recovery UI, distinguish these actions mechanically:
 
@@ -718,6 +722,6 @@ A public release additionally requires:
 
 ## Final baseline validation note
 
-`cargo test --locked --manifest-path src-tauri/Cargo.toml` completed successfully: 23 passed, 0 failed. Binary and documentation test targets also completed successfully with zero tests. Typecheck and frontend production build passed. The dependency audit failed only for the nanoid advisory documented in F32. Rust advisory scanning, signed installer builds, live Groq requests, and Windows hardware/UI acceptance tests were not performed.
+These results describe the audit-only baseline, before the implementation commits, and are historical: `cargo test --locked --manifest-path src-tauri/Cargo.toml` completed successfully: 23 passed, 0 failed, and the dependency audit failed only for the nanoid advisory documented in F32. At reviewed HEAD 7240fe2 the Rust suite has 17 tests, nanoid resolves to 3.3.18, and `npm audit --audit-level=high` is clean. Binary and documentation test targets also completed successfully with zero tests. Typecheck and frontend production build passed. Rust advisory scanning, signed installer builds, live Groq requests, and Windows hardware/UI acceptance tests were not performed.
 
-Cargo refreshed the line endings of two tracked generated schema files during validation. Those generated changes were restored to the baseline. Final tracked-file status must show only the new `PLAN.md`; ignored dependency/build outputs created for validation are not application implementation changes.
+Cargo refreshed the line endings of two tracked generated schema files during validation. Those generated changes were restored to the baseline. Final tracked-file status must show only the new `PLAN.md`; the working tree also contained the untracked review/tooling configuration files `.coderabbit-zizmor.yml`, `.htmlhintrc`, and `.stylelintrc.json`, which are not part of the plan. Ignored dependency/build outputs created for validation are not application implementation changes.

@@ -5,6 +5,9 @@ import type { WorkflowStateSnapshot } from "../src/types";
 let mockIsTauri = false;
 let mockEventCallback: ((event: { payload: WorkflowStateSnapshot }) => void) | undefined;
 let mockWorkflowStateResult: WorkflowStateSnapshot | null = null;
+// Optional deferred implementations used by subscribe-first ordering tests.
+let mockListenImpl: ((cb: (event: { payload: WorkflowStateSnapshot }) => void) => Promise<() => void>) | null = null;
+let mockWorkflowStateImpl: (() => Promise<WorkflowStateSnapshot>) | null = null;
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => mockIsTauri,
@@ -14,16 +17,23 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn((_event: string, cb: (event: { payload: WorkflowStateSnapshot }) => void) => {
     mockEventCallback = cb;
+    if (mockListenImpl) {
+      return mockListenImpl(cb);
+    }
     return Promise.resolve(() => {});
   }),
 }));
 
 vi.mock("../src/api", () => ({
   api: {
-    workflowState: () =>
-      mockWorkflowStateResult
+    workflowState: () => {
+      if (mockWorkflowStateImpl) {
+        return mockWorkflowStateImpl();
+      }
+      return mockWorkflowStateResult
         ? Promise.resolve(mockWorkflowStateResult)
-        : Promise.reject(new Error("No snapshot")),
+        : Promise.reject(new Error("No snapshot"));
+    },
   },
 }));
 
@@ -36,6 +46,8 @@ describe("useWorkflowState Hook (F22)", () => {
     mockIsTauri = false;
     mockEventCallback = undefined;
     mockWorkflowStateResult = null;
+    mockListenImpl = null;
+    mockWorkflowStateImpl = null;
   });
 
   it("initializes with idle phase when not running in Tauri", () => {
@@ -100,6 +112,83 @@ describe("useWorkflowState Hook (F22)", () => {
       });
     });
 
+    expect(result.current.revision).toBe(11);
+    expect(result.current.phase).toBe("transcribing");
+    expect(result.current.isProcessing).toBe(true);
+  });
+
+  it("subscribes before fetching the snapshot and keeps the greatest revision", async () => {
+    mockIsTauri = true;
+
+    const initialSnapshot: WorkflowStateSnapshot = {
+      revision: 10,
+      session_id: 1,
+      phase: "recording",
+      active_pending_id: null,
+      can_start: false,
+      can_stop: true,
+      can_cancel: true,
+      message_code: null,
+    };
+    const laterSnapshot: WorkflowStateSnapshot = {
+      ...initialSnapshot,
+      revision: 11,
+      phase: "transcribing",
+    };
+
+    // Deferred promises for both listen and workflowState.
+    let resolveListen!: (unlisten: () => void) => void;
+    const listenDeferred = new Promise<() => void>((resolve) => {
+      resolveListen = resolve;
+    });
+    let resolveSnapshot!: (snapshot: WorkflowStateSnapshot) => void;
+    const snapshotDeferred = new Promise<WorkflowStateSnapshot>((resolve) => {
+      resolveSnapshot = resolve;
+    });
+
+    let listenSettled = false;
+    mockListenImpl = () =>
+      listenDeferred.then((unlisten) => {
+        listenSettled = true;
+        return unlisten;
+      });
+    mockWorkflowStateImpl = () => snapshotDeferred;
+
+    const { result } = renderHook(() => useWorkflowState());
+
+    // The handler is registered synchronously, but the snapshot request must
+    // begin only after the subscription promise resolves.
+    expect(mockEventCallback).toBeDefined();
+    expect(listenSettled).toBe(false);
+    expect(result.current.revision).toBe(0);
+
+    resolveListen(() => {});
+    await act(async () => {
+      await listenDeferred;
+      await Promise.resolve();
+    });
+    expect(listenSettled).toBe(true);
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.revision).toBe(0);
+
+    // Revision 11 arrives BEFORE the revision 10 snapshot resolves.
+    act(() => {
+      mockEventCallback?.({ payload: laterSnapshot });
+    });
+    expect(result.current.revision).toBe(11);
+    expect(result.current.phase).toBe("transcribing");
+
+    resolveSnapshot(initialSnapshot);
+    await act(async () => {
+      await snapshotDeferred;
+      await Promise.resolve();
+    });
+
+    // Greatest-revision preservation: the older snapshot must not win.
     expect(result.current.revision).toBe(11);
     expect(result.current.phase).toBe("transcribing");
     expect(result.current.isProcessing).toBe(true);

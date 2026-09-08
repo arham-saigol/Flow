@@ -130,9 +130,14 @@ pub fn filter_conflicting_corrections(
     let mut valid = Vec::new();
     let mut conflicts = Vec::new();
 
-    for (norm, reps) in groups {
+    for (norm, mut reps) in groups {
+        // Identical replacement values are not conflicts: deduplicate first so
+        // entries that differ only in source casing but share one replacement
+        // are retained and applied.
+        reps.sort();
+        reps.dedup();
         if reps.len() > 1 {
-            // Multiple rules with the same normalized source is a conflict
+            // Multiple distinct rules with the same normalized source is a conflict
             conflicts.push(norm);
         } else if let Some(rep) = reps.into_iter().next() {
             valid.push(ValidatedCorrection {

@@ -425,6 +425,9 @@ pub fn scan_and_import_spools(
                             if database.has_capture_uuid(&capture_uuid).unwrap_or(false) {
                                 let _ = fs::remove_file(&pcm_part_path);
                                 let _ = fs::remove_file(&path);
+                                // Finish cleanup by removing the terminal marker
+                                // once the PCM and metadata files are handled.
+                                let _ = fs::remove_file(&terminal_path);
                             } else {
                                 quarantine_spool(recovery_dir, &capture_uuid);
                             }

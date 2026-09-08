@@ -88,6 +88,11 @@ pub fn run_helper() {
                                 break;
                             }
                         } else {
+                            // An oversized format aborts the snapshot: restoring a
+                            // partial clipboard could silently drop the user's
+                            // clipboard data. The parent treats this failure as
+                            // copy-only delivery and keeps the dictation saved
+                            // for review instead of pasting.
                             success = false;
                             break;
                         }

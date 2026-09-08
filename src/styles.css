@@ -813,7 +813,7 @@ textarea::-webkit-scrollbar {
   pointer-events: none;
 }
 
-.toast { position: fixed; z-index: 80; right: 25px; bottom: 24px; max-width: 360px; min-height: 42px; padding: 0 8px 0 13px; display: flex; align-items: center; gap: 9px; color: #fdfaf6; background: #2c2a26; border-radius: 10px; box-shadow: var(--shadow); font-size: 12px; animation: toast-in 180ms ease-out; }
+.toast { position: fixed; z-index: 200; right: 25px; bottom: 24px; max-width: 360px; min-height: 42px; padding: 0 8px 0 13px; display: flex; align-items: center; gap: 9px; color: #fdfaf6; background: #2c2a26; border-radius: 10px; box-shadow: var(--shadow); font-size: 12px; animation: toast-in 180ms ease-out; }
 .toast--success > svg { color: #f3f1ed; }
 .toast--error > svg { color: #f3f1ed; }
 .toast button { width: 28px; height: 28px; display: grid; place-items: center; color: #aaa49a; background: transparent; border: 0; cursor: pointer; }

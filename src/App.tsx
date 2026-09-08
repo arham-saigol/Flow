@@ -174,11 +174,13 @@ export default function App() {
   }, [notify]);
 
   const handleAcceptPrivacy = () => {
-    localStorage.setItem("flow_seen_privacy_notice", "true");
-    setPrivacyOpen(false);
     void api
       .acknowledgePrivacyNotice(1)
       .then(() => {
+        // Persist the flag and close the modal only after the acknowledgement
+        // saved successfully; keep the modal open on failure.
+        localStorage.setItem("flow_seen_privacy_notice", "true");
+        setPrivacyOpen(false);
         notify({ kind: "success", message: "Privacy notice acknowledged" });
       })
       .catch((err) => {

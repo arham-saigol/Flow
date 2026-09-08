@@ -101,6 +101,8 @@ export default function Overlay() {
         targetLevel.current = 0;
         displayedLevel.current = 0;
         publishProgress(0);
+        // A new session must never inherit the previous session's closing state.
+        setIsClosing(false);
       }
       if (phase === "idle") {
         setIsClosing(true);

@@ -27,6 +27,7 @@ use windows::{
             },
             LibraryLoader::GetModuleHandleW,
             Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+            SystemInformation::GetTickCount,
         },
         UI::{
             Input::KeyboardAndMouse::{
@@ -73,6 +74,8 @@ static CLIPBOARD_RENDER_HANDLER_INSTALLED: AtomicBool = AtomicBool::new(false);
 static MAIN_HWND: AtomicIsize = AtomicIsize::new(0);
 static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
 static CAPTURING_SHORTCUT: AtomicBool = AtomicBool::new(false);
+static CAPTURE_START_TICK: AtomicU32 = AtomicU32::new(0);
+const SHORTCUT_CAPTURE_TIMEOUT_MS: u32 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TargetWindow {
@@ -163,7 +166,21 @@ pub fn set_recording(recording: bool) {
 }
 
 pub fn start_shortcut_capture() {
+    // Record the capture start tick BEFORE enabling the flag: the hook may
+    // observe the flag immediately and needs the deadline to be defined.
+    let start_tick: u32 = unsafe { GetTickCount() };
+    CAPTURE_START_TICK.store(start_tick, Ordering::Release);
     CAPTURING_SHORTCUT.store(true, Ordering::Release);
+}
+
+fn shortcut_capture_expired() -> bool {
+    let start = CAPTURE_START_TICK.load(Ordering::Acquire);
+    let now: u32 = unsafe { GetTickCount() };
+    now.wrapping_sub(start) >= SHORTCUT_CAPTURE_TIMEOUT_MS
+}
+
+fn is_shortcut_capture_key(vk: u32) -> bool {
+    matches!(vk, 0xA5 | 0xA4 | 0xA3 | 0x77 | 0x78 | 0x79 | 0x7A | 0x7B | 0x1B)
 }
 
 pub fn cancel_shortcut_capture() {
@@ -305,34 +322,50 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     }
 
     if CAPTURING_SHORTCUT.load(Ordering::Acquire) {
-        if key_down {
-            if vk == VK_ESCAPE.0 as u32 {
-                CAPTURING_SHORTCUT.store(false, Ordering::Release);
-                if let Some(app) = APP.get() {
-                    let _ = app.emit("shortcut-capture-cancelled", ());
-                }
-                return LRESULT(1);
+        if shortcut_capture_expired() {
+            // The capture deadline passed: leave capture mode and process this
+            // event through the normal path so the keyboard is never left
+            // captured without a user-visible way out.
+            CAPTURING_SHORTCUT.store(false, Ordering::Release);
+            if let Some(app) = APP.get() {
+                let _ = app.emit("shortcut-capture-cancelled", ());
             }
-            let keybind = match vk {
-                0xA5 => Some("Right Alt"),
-                0xA4 => Some("Left Alt"),
-                0xA3 => Some("Right Ctrl"),
-                0x77 => Some("F8"),
-                0x78 => Some("F9"),
-                0x79 => Some("F10"),
-                0x7A => Some("F11"),
-                0x7B => Some("F12"),
-                _ => None,
-            };
-            if let Some(name) = keybind {
-                CAPTURING_SHORTCUT.store(false, Ordering::Release);
-                if let Some(app) = APP.get() {
-                    let _ = app.emit("shortcut-captured", serde_json::json!({ "keybind": name }));
+        } else {
+            if key_down {
+                if vk == VK_ESCAPE.0 as u32 {
+                    CAPTURING_SHORTCUT.store(false, Ordering::Release);
+                    if let Some(app) = APP.get() {
+                        let _ = app.emit("shortcut-capture-cancelled", ());
+                    }
+                    return LRESULT(1);
                 }
-                return LRESULT(1);
+                let keybind = match vk {
+                    0xA5 => Some("Right Alt"),
+                    0xA4 => Some("Left Alt"),
+                    0xA3 => Some("Right Ctrl"),
+                    0x77 => Some("F8"),
+                    0x78 => Some("F9"),
+                    0x79 => Some("F10"),
+                    0x7A => Some("F11"),
+                    0x7B => Some("F12"),
+                    _ => None,
+                };
+                if let Some(name) = keybind {
+                    CAPTURING_SHORTCUT.store(false, Ordering::Release);
+                    if let Some(app) = APP.get() {
+                        let _ = app.emit("shortcut-captured", serde_json::json!({ "keybind": name }));
+                    }
+                    return LRESULT(1);
+                }
             }
+            // Continue consuming recognized capture keys (Escape and shortcut
+            // candidates) in both directions; unrecognized key-up events pass
+            // through so ordinary typing is not swallowed while capturing.
+            if key_up && !is_shortcut_capture_key(vk) {
+                return CallNextHookEx(HHOOK::default(), code, wparam, lparam);
+            }
+            return LRESULT(1);
         }
-        return LRESULT(1);
     }
 
     if vk == VK_ESCAPE.0 as u32 && RECORDING.load(Ordering::Acquire) {
@@ -622,8 +655,7 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
 
         let Some(original) = prepare_temporary_clipboard(target, text)? else {
             return Err(FlowError::Windows(
-                "Flow could not safely preserve the clipboard. Recovered dictation copied instead."
-                    .into(),
+                "Flow could not safely preserve the clipboard.".into(),
             ));
         };
         let paste_result = (|| {
@@ -1169,7 +1201,9 @@ fn report_input_error(app: AppHandle, error: FlowError) {
         if RECORDING.load(Ordering::Acquire) {
             let _ = crate::workflow::cancel(&app);
         }
-        crate::workflow::report_error(&app, error);
+        // Cancel already owns the session reset; report without a session id so
+        // a stale input failure cannot overwrite a newer recording session.
+        crate::workflow::report_error(&app, error, None);
     });
 }
 

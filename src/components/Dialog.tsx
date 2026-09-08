@@ -11,6 +11,8 @@ interface DialogProps {
   returnFocusRef?: RefObject<HTMLElement | null>;
   size?: "sm" | "md" | "lg" | "xl";
   maxWidthClass?: string; // backwards compatibility
+  /** Hides the close button and disables backdrop-click and Escape dismissal. */
+  blocking?: boolean;
 }
 
 export function Dialog({
@@ -20,9 +22,14 @@ export function Dialog({
   children,
   returnFocusRef,
   size = "md",
+  blocking = false,
 }: DialogProps) {
   const titleId = useId();
-  const dialogRef = useDialogFocus(open, returnFocusRef, onClose);
+  const dialogRef = useDialogFocus(
+    open,
+    returnFocusRef,
+    blocking ? undefined : onClose,
+  );
 
   if (!open) return null;
 
@@ -36,8 +43,10 @@ export function Dialog({
   return createPortal(
     <div
       className="modal-backdrop"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) {
+      // onMouseDown instead of onClick so a drag that starts inside the panel
+      // (e.g. selecting text) does not dismiss the dialog when it ends outside.
+      onMouseDown={(e) => {
+        if (!blocking && e.target === e.currentTarget) {
           onClose();
         }
       }}
@@ -55,14 +64,16 @@ export function Dialog({
           <h2 id={titleId} className="modal-title">
             {title}
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close dialog"
-            className="modal-close-btn"
-          >
-            <X size={18} />
-          </button>
+          {!blocking && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Close dialog"
+              className="modal-close-btn"
+            >
+              <X size={18} />
+            </button>
+          )}
         </header>
         <div className="modal-body">{children}</div>
       </section>

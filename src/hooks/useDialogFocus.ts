@@ -94,9 +94,13 @@ export function useDialogFocus(
         rootEl.removeAttribute("inert");
       }
 
-      const targetToFocus = returnFocusRef?.current ?? previousActiveElementRef.current;
-      if (targetToFocus && targetToFocus.isConnected && typeof targetToFocus.focus === "function") {
-        targetToFocus.focus();
+      // Only restore the original focus when no other dialog remains open;
+      // otherwise the focus-to-top-dialog behavior above must be preserved.
+      if (dialogStack.length === 0) {
+        const targetToFocus = returnFocusRef?.current ?? previousActiveElementRef.current;
+        if (targetToFocus && targetToFocus.isConnected && typeof targetToFocus.focus === "function") {
+          targetToFocus.focus();
+        }
       }
     };
   }, [open, returnFocusRef]);

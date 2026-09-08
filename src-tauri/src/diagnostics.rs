@@ -109,10 +109,85 @@ pub fn export_diagnostics() -> String {
     String::new()
 }
 
-fn sanitize_message(msg: &str) -> String {
-    let mut safe = msg.to_string();
-    if safe.contains("gsk_") || safe.contains("Bearer") || safe.contains("key") {
-        safe = "[REDACTED]".into();
+fn find_case_insensitive(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    // ASCII-only needles, searched without changing the haystack so byte
+    // offsets always stay valid char boundaries even for non-ASCII text.
+    let hay = haystack.as_bytes();
+    let ned = needle.as_bytes();
+    let mut start = from;
+    while start + ned.len() <= hay.len() {
+        if hay[start..start + ned.len()].eq_ignore_ascii_case(ned) {
+            return Some(start);
+        }
+        start += 1;
     }
-    safe
+    None
+}
+
+fn redact_secret_tokens(
+    msg: &str,
+    needle: &str,
+    keep_prefix: usize,
+    token_len: impl Fn(&str) -> usize,
+) -> String {
+    let mut out = String::with_capacity(msg.len());
+    let mut cursor = 0;
+    while let Some(match_start) = find_case_insensitive(msg, needle, cursor) {
+        out.push_str(&msg[cursor..match_start + keep_prefix]);
+        let token_end = (match_start + needle.len() + token_len(&msg[match_start + needle.len()..]))
+            .min(msg.len());
+        out.push_str("[REDACTED]");
+        cursor = token_end;
+    }
+    out.push_str(&msg[cursor..]);
+    out
+}
+
+fn sanitize_message(msg: &str) -> String {
+    // Case-insensitive, token-specific secret detection. Ordinary words such
+    // as "hotkey" or "keyboard" no longer trigger redaction; only the matched
+    // secret token is replaced and the rest of the message is preserved.
+    let with_keys_redacted = redact_secret_tokens(msg, "gsk_", 0, |rest| {
+        rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .unwrap_or(rest.len())
+    });
+    redact_secret_tokens(&with_keys_redacted, "bearer", "bearer".len(), |rest| {
+        let leading = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        let after = &rest[leading..];
+        leading + after.find(char::is_whitespace).unwrap_or(after.len())
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_message;
+
+    #[test]
+    fn ordinary_words_are_not_redacted() {
+        assert_eq!(sanitize_message("hotkey captured: keyboard F12"), "hotkey captured: keyboard F12");
+    }
+
+    #[test]
+    fn secret_tokens_are_redacted_in_place() {
+        assert_eq!(
+            sanitize_message("request failed for key Gsk_AbC-123_xY with status 401"),
+            "request failed for key [REDACTED] with status 401"
+        );
+        assert_eq!(
+            sanitize_message("Authorization: Bearer sk-secret123 rejected"),
+            "Authorization: Bearer[REDACTED] rejected"
+        );
+        assert_eq!(
+            sanitize_message("authorization: bearer\ttok.en here"),
+            "authorization: bearer[REDACTED] here"
+        );
+    }
+
+    #[test]
+    fn non_ascii_text_does_not_break_offset_slicing() {
+        assert_eq!(
+            sanitize_message("İstanbul bearer abc123"),
+            "İstanbul bearer[REDACTED]"
+        );
+    }
 }

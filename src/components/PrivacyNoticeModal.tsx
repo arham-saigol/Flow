@@ -20,6 +20,7 @@ export function PrivacyNoticeModal({
       title="Privacy & Data Processing Notice"
       returnFocusRef={returnFocusRef}
       size="lg"
+      blocking
     >
       <div className="privacy-notice">
         <div className="privacy-banner">

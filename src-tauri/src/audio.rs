@@ -141,11 +141,23 @@ impl AudioRecorder {
             })))
             .map_err(|_| FlowError::Audio("The audio worker stopped unexpectedly.".into()))?;
 
-        response.recv_timeout(Duration::from_secs(5)).map_err(|_| {
-            FlowError::Audio(
-                "The microphone is not responding. Restart Flow to reconnect it.".into(),
-            )
-        })?
+        match response.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(_) => {
+                // The worker may still complete the queued Start after this
+                // timeout. Enqueue a cancellation so the worker tears the
+                // session down and recording_flag/active are cleaned up
+                // instead of leaving an orphaned capture running.
+                let (cancel_reply, _cancel_response) = mpsc::sync_channel(1);
+                let _ = self.sender.send(RecorderCommand::Cancel {
+                    session_id,
+                    reply: cancel_reply,
+                });
+                Err(FlowError::Audio(
+                    "The microphone is not responding. Restart Flow to reconnect it.".into(),
+                ))
+            }
+        }
     }
 
     pub fn stop(&self, session_id: u64) -> Result<CapturedAudio> {
@@ -816,6 +828,37 @@ fn spawn_capture_worker(
                 }
                 if !consumed {
                     std::thread::sleep(Duration::from_millis(2));
+                }
+            }
+
+            // If capture ended before channel selection completed, select a
+            // fallback channel now so the buffered initial frames are not
+            // dropped: prefer the loudest channel from the initial buffer.
+            if selected_channel.is_none() && !initial_buffer.is_empty() {
+                let num_frames = initial_buffer.len() / channels;
+                if num_frames > 0 {
+                    let mut channel_sums = vec![0.0f32; channels];
+                    for frame in initial_buffer.chunks_exact(channels) {
+                        for (ch, &s) in frame.iter().enumerate() {
+                            channel_sums[ch] += s * s;
+                        }
+                    }
+                    let mut best_ch = 0;
+                    let mut max_rms = -1.0f32;
+                    for (ch, &sum) in channel_sums.iter().enumerate() {
+                        let rms = (sum / num_frames as f32).sqrt();
+                        if rms > max_rms {
+                            max_rms = rms;
+                            best_ch = ch;
+                        }
+                    }
+                    for frame in initial_buffer.chunks_exact(channels) {
+                        let s = frame[best_ch];
+                        peak = peak.max(s.abs());
+                        input_accumulator.push(s);
+                        total_input_frames += 1;
+                    }
+                    initial_buffer.clear();
                 }
             }
 

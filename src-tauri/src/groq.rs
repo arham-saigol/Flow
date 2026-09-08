@@ -507,7 +507,11 @@ fn get_retry_delay(resp: &reqwest::Response, attempt: usize) -> Option<Duration>
 
 fn map_status_error(status: StatusCode) -> FlowError {
     match status {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => FlowError::MissingApiKey,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            // Same invalid-key error and wording as test_key so transcription
+            // and cleanup failures read identically to the key check.
+            FlowError::Message("Invalid Groq API key.".into())
+        }
         StatusCode::NOT_FOUND => {
             FlowError::Message("Requested model was not found on Groq.".into())
         }
@@ -530,7 +534,8 @@ mod tests {
 
     #[test]
     fn test_dictation_cleanup_prompt_snapshot() {
-        let loaded = include_str!("../prompts/dictation_cleanup.txt");
+        // Normalize line endings so the snapshot holds on CRLF checkouts too.
+        let loaded = include_str!("../prompts/dictation_cleanup.txt").replace("\r\n", "\n");
         assert!(loaded.starts_with("You clean speech-to-text dictation."));
         assert!(loaded.contains("raw_transcript is the original transcription."));
         assert!(loaded.contains("corrected_transcript contains the same dictation"));

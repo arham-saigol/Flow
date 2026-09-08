@@ -66,9 +66,16 @@ export function SettingsModal({
   const transcriptionTabRef = useRef<HTMLButtonElement>(null);
 
   const testingMicRef = useRef(testingMic);
-  testingMicRef.current = testingMic;
   const capturingHotkeyRef = useRef(capturingHotkey);
-  capturingHotkeyRef.current = capturingHotkey;
+
+  // Sync refs after commit (not during render) so the unmount cleanup below
+  // observes only values from committed renders.
+  useEffect(() => {
+    testingMicRef.current = testingMic;
+  }, [testingMic]);
+  useEffect(() => {
+    capturingHotkeyRef.current = capturingHotkey;
+  }, [capturingHotkey]);
 
   const handleTabKeyDown = (e: React.KeyboardEvent, current: "general" | "transcription") => {
     if (e.key === "ArrowRight" || e.key === "ArrowDown") {

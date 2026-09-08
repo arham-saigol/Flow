@@ -21,7 +21,7 @@ use models::{
 };
 use tauri::{
     menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, State, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as AutostartManagerExt;
@@ -35,11 +35,18 @@ pub struct AppState {
     pub groq: GroqClient,
 }
 
-fn require_main_window(window: &tauri::WebviewWindow) -> Result<()> {
-    if window.label() != "main" {
+/// Per-command authorization decision: sensitive commands accept only the
+/// main-window label. The overlay label may not invoke any command here; it
+/// only receives `get_workflow_state` data and the `workflow-state` event.
+fn authorize_label(label: &str) -> Result<()> {
+    if label != "main" {
         return Err(FlowError::Unauthorized);
     }
     Ok(())
+}
+
+fn require_main_window(window: &tauri::WebviewWindow) -> Result<()> {
+    authorize_label(window.label())
 }
 
 #[tauri::command]
@@ -212,6 +219,28 @@ fn get_settings(window: tauri::WebviewWindow, state: State<'_, AppState>) -> Res
     state.database.settings(credentials::has_api_key())
 }
 
+/// Reverts the autostart flag and tray tooltip to the previous settings.
+/// Rollback failures are detected and reported instead of ignored.
+fn revert_autostart_and_tooltip(
+    autostart: &tauri_plugin_autostart::AutoLaunchManager,
+    tray: &TrayIcon,
+    previous: &SettingsData,
+) -> std::result::Result<(), String> {
+    let mut failures: Vec<String> = Vec::new();
+    if let Err(error) = set_autostart(autostart, previous.launch_at_startup) {
+        failures.push(format!("launch-at-startup could not be reverted: {error}"));
+    }
+    let tooltip = format!("Flow — {} to dictate", previous.keybind);
+    if let Err(error) = tray.set_tooltip(Some(&tooltip)) {
+        failures.push(format!("the tray tooltip could not be reverted: {error}"));
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
 #[tauri::command]
 fn save_settings(
     window: tauri::WebviewWindow,
@@ -221,6 +250,10 @@ fn save_settings(
     api_key: Option<String>,
 ) -> Result<()> {
     require_main_window(&window)?;
+
+    // Validate through the database validation path (keybind, history
+    // retention) before changing autostart, the tray tooltip, or the API key.
+    state.database.validate_settings(&settings)?;
 
     let previous = state.database.settings(credentials::has_api_key())?;
     let autostart = app.autolaunch();
@@ -232,10 +265,15 @@ fn save_settings(
         .ok_or_else(|| FlowError::Message("The system tray icon is unavailable.".into()))?;
     let tooltip = format!("Flow — {} to dictate", settings.keybind);
     if let Err(error) = tray.set_tooltip(Some(&tooltip)) {
-        let _ = set_autostart(&autostart, previous.launch_at_startup);
-        return Err(FlowError::Message(format!(
-            "Could not update the system tray: {error}"
-        )));
+        let revert_result = revert_autostart_and_tooltip(&autostart, &tray, &previous);
+        return Err(match revert_result {
+            Ok(()) => {
+                FlowError::Message(format!("Could not update the system tray: {error}"))
+            }
+            Err(revert_err) => FlowError::PartialSettingsSave(format!(
+                "Could not update the system tray: {error}; {revert_err}."
+            )),
+        });
     }
     let api_key = api_key.filter(|key| !key.trim().is_empty());
     let previous_api_key = api_key
@@ -243,9 +281,13 @@ fn save_settings(
         .and_then(|_| credentials::read_api_key().ok());
     if let Some(api_key) = api_key.as_ref() {
         if let Err(error) = credentials::save_api_key(api_key) {
-            let _ = set_autostart(&autostart, previous.launch_at_startup);
-            let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
-            return Err(error);
+            let revert_result = revert_autostart_and_tooltip(&autostart, &tray, &previous);
+            return Err(match revert_result {
+                Ok(()) => error,
+                Err(revert_err) => FlowError::PartialSettingsSave(format!(
+                    "{error}; {revert_err}."
+                )),
+            });
         }
     }
     if let Err(error) = state.database.save_settings(&settings) {
@@ -255,16 +297,23 @@ fn save_settings(
                 None => credentials::delete_api_key(),
             };
             if let Err(revert_err) = revert_result {
-                let _ = set_autostart(&autostart, previous.launch_at_startup);
-                let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
+                let revert_rest = revert_autostart_and_tooltip(&autostart, &tray, &previous);
+                let rest_details = match revert_rest {
+                    Ok(()) => String::new(),
+                    Err(details) => format!(" {details}."),
+                };
                 return Err(FlowError::PartialSettingsSave(format!(
-                    "Settings failed to save ({error}), and API key could not be reverted ({revert_err})."
+                    "Settings failed to save ({error}), and API key could not be reverted ({revert_err}).{rest_details}"
                 )));
             }
         }
-        let _ = set_autostart(&autostart, previous.launch_at_startup);
-        let _ = tray.set_tooltip(Some(format!("Flow — {} to dictate", previous.keybind)));
-        return Err(error);
+        let revert_result = revert_autostart_and_tooltip(&autostart, &tray, &previous);
+        return Err(match revert_result {
+            Ok(()) => error,
+            Err(revert_err) => FlowError::PartialSettingsSave(format!(
+                "Settings failed to save ({error}), and the previous settings could not be fully restored: {revert_err}."
+            )),
+        });
     }
     platform::configure_keybind(&settings.keybind);
     Ok(())
@@ -510,8 +559,19 @@ pub fn run() {
                 interval.tick().await;
                 loop {
                     interval.tick().await;
-                    let state = app_handle.state::<AppState>();
-                    let _ = state.database.run_maintenance(None);
+                    // Read the active pending ID so active-item exclusion stays
+                    // enabled, then run the synchronous database cleanup on a
+                    // blocking thread so the async runtime is never blocked.
+                    let active_pending_id = app_handle
+                        .state::<AppState>()
+                        .workflow
+                        .active_pending_id();
+                    let blocker = app_handle.clone();
+                    let _ = tauri::async_runtime::spawn_blocking(move || {
+                        let state = blocker.state::<AppState>();
+                        state.database.run_maintenance(active_pending_id)
+                    })
+                    .await;
                 }
             });
 
@@ -574,7 +634,16 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::text;
+    use super::{authorize_label, text};
+
+    #[test]
+    fn command_allowlist_accepts_only_the_main_window_label() {
+        assert!(authorize_label("main").is_ok());
+        // The overlay label must not invoke sensitive commands.
+        assert!(authorize_label("overlay").is_err());
+        assert!(authorize_label("").is_err());
+        assert!(authorize_label("other").is_err());
+    }
 
     #[test]
     fn snippet_matching_normalizes_case_spacing_and_edge_punctuation() {

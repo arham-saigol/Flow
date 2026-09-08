@@ -486,8 +486,9 @@ impl Database {
         })
     }
 
-    pub fn save_settings(&self, settings: &SettingsData) -> Result<()> {
-        // Validate keybind and retention
+    /// Validates settings values (keybind, history retention) without writing.
+    /// This is the validation path used before any settings save side effects.
+    pub fn validate_settings(&self, settings: &SettingsData) -> Result<()> {
         if settings.keybind.parse::<Keybind>().is_err() {
             return Err(FlowError::Message("Unsupported keybind.".into()));
         }
@@ -498,6 +499,12 @@ impl Database {
         {
             return Err(FlowError::Message("Unsupported retention period.".into()));
         }
+        Ok(())
+    }
+
+    pub fn save_settings(&self, settings: &SettingsData) -> Result<()> {
+        // Validate keybind and retention
+        self.validate_settings(settings)?;
 
         let mut conn = self.conn()?;
         let transaction = conn.transaction()?;

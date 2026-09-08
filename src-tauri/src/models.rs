@@ -259,9 +259,9 @@ pub struct AppConfig {
     pub max_recovery_bytes: u64,
     pub supported_keybinds: Vec<String>,
     pub supported_retentions: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    // Nullable in the TypeScript contract: absent values must serialize as
+    // null, never as missing fields.
     pub backup_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_expires_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allocated_recovery_bytes: Option<u64>,
