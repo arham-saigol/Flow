@@ -61,8 +61,7 @@ pub fn run_helper() {
                 }
 
                 if !is_hglobal_clipboard_format(current_format) {
-                    success = false;
-                    break;
+                    continue;
                 }
 
                 let handle_result = GetClipboardData(current_format);

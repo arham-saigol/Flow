@@ -129,10 +129,17 @@ pub fn remembered_target() -> Option<TargetWindow> {
     LAST_TARGET.lock().ok().and_then(|target| *target)
 }
 
-fn is_flow_window(hwnd: isize) -> bool {
+pub fn is_flow_window(hwnd: isize) -> bool {
     let main = MAIN_HWND.load(Ordering::Acquire);
     let overlay = OVERLAY_HWND.load(Ordering::Acquire);
-    (main != 0 && hwnd == main) || (overlay != 0 && hwnd == overlay)
+    if (main != 0 && hwnd == main) || (overlay != 0 && hwnd == overlay) {
+        return true;
+    }
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid));
+        pid != 0 && pid == std::process::id()
+    }
 }
 
 pub fn configure_keybind(keybind: &str) {
@@ -469,16 +476,14 @@ pub fn paste_text(target: TargetWindow, text: &str) -> Result<&'static str> {
         if target.pid != 0 && current_pid != target.pid {
             return Err(FlowError::Windows("The target process has changed.".into()));
         }
-        if !SetForegroundWindow(target_hwnd).as_bool() {
-            return Err(FlowError::Windows(
-                "Could not focus the target window.".into(),
-            ));
-        }
-        thread::sleep(Duration::from_millis(24));
         if GetForegroundWindow().0 != target_hwnd.0 {
-            return Err(FlowError::Windows(
-                "The target window did not acquire focus.".into(),
-            ));
+            let _ = SetForegroundWindow(target_hwnd);
+            thread::sleep(Duration::from_millis(50));
+            if GetForegroundWindow().0 != target_hwnd.0 {
+                return Err(FlowError::Windows(
+                    "The target window did not acquire focus.".into(),
+                ));
+            }
         }
     }
     paste_via_clipboard(target_hwnd, text)?;

@@ -259,13 +259,25 @@ pub async fn stop_and_process(app: &AppHandle) -> Result<()> {
             .cancellation_token
             .clone()
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let initial_destination = wf.destination;
         let stop_target = platform::capture_target_with_session(session_id);
+        let destination_target = if stop_target.hwnd != 0 && !platform::is_flow_window(stop_target.hwnd) {
+            stop_target
+        } else if let Some(dest) = initial_destination {
+            if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
+                dest
+            } else {
+                platform::remembered_target().unwrap_or(stop_target)
+            }
+        } else {
+            platform::remembered_target().unwrap_or(stop_target)
+        };
 
         wf.phase = WorkflowPhase::Stopping;
-        wf.destination = Some(stop_target);
+        wf.destination = Some(destination_target);
         wf.revision = state.workflow.next_revision();
 
-        (session_id, capture_uuid, cancel_token, stop_target)
+        (session_id, capture_uuid, cancel_token, destination_target)
     };
 
     platform::set_recording(false);
@@ -309,7 +321,7 @@ pub(crate) fn process_captured_in_background(
     captured: crate::audio::CapturedAudio,
 ) {
     let state = app.state::<AppState>();
-    let (session_id, capture_uuid, cancel_token) = {
+    let (session_id, capture_uuid, cancel_token, destination) = {
         let wf = state.workflow.state.lock().unwrap();
         (
             wf.session_id.unwrap_or(0),
@@ -319,10 +331,22 @@ pub(crate) fn process_captured_in_background(
             wf.cancellation_token
                 .clone()
                 .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            wf.destination,
         )
     };
     let app_clone = app.clone();
-    let target = platform::capture_target_with_session(session_id);
+    let bg_target = platform::capture_target_with_session(session_id);
+    let target = if bg_target.hwnd != 0 && !platform::is_flow_window(bg_target.hwnd) {
+        bg_target
+    } else if let Some(dest) = destination {
+        if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
+            dest
+        } else {
+            platform::remembered_target().unwrap_or(bg_target)
+        }
+    } else {
+        platform::remembered_target().unwrap_or(bg_target)
+    };
     tauri::async_runtime::spawn(async move {
         process_captured(
             &app_clone,
@@ -587,25 +611,40 @@ async fn run_pending(
 
     let delivery_outcome = if initial_delivery_mode == "automatic" {
         if let Some(t) = target {
-            state
-                .database
-                .update_pending_delivery(pending_id, "shortcut_sent", None)?;
-            let outcome = platform::paste_text(t, &final_text);
-            match outcome {
-                Ok("pasted") => {
-                    state
-                        .database
-                        .update_pending_delivery(pending_id, "shortcut_sent", None)?;
-                    let _ = state.database.delete_pending(pending_id);
-                    "Dictation sent to the selected application"
-                }
-                _ => {
-                    state.database.update_pending_delivery(
-                        pending_id,
-                        "not_attempted",
-                        Some("Destination was unavailable. Dictation saved for review."),
-                    )?;
-                    "Destination was unavailable. Dictation saved for review."
+            if platform::is_flow_window(t.hwnd) {
+                state
+                    .database
+                    .update_pending_delivery(pending_id, "not_attempted", None)?;
+                "Dictation ready for review"
+            } else {
+                let outcome = platform::paste_text(t, &final_text);
+                match outcome {
+                    Ok("pasted") => {
+                        state
+                            .database
+                            .update_pending_delivery(pending_id, "shortcut_sent", None)?;
+                        let _ = state.database.delete_pending(pending_id);
+                        "Dictation sent to the selected application"
+                    }
+                    Err(err) => {
+                        let msg = format!("Paste delivery failed: {err}");
+                        crate::diagnostics::log_event("error", Some(session_id), None, &msg);
+                        let warning = format!("Delivery failed: {err}. Dictation saved for review.");
+                        state.database.update_pending_delivery(
+                            pending_id,
+                            "not_attempted",
+                            Some(&warning),
+                        )?;
+                        "Destination was unavailable. Dictation saved for review."
+                    }
+                    _ => {
+                        state.database.update_pending_delivery(
+                            pending_id,
+                            "not_attempted",
+                            Some("Destination was unavailable. Dictation saved for review."),
+                        )?;
+                        "Destination was unavailable. Dictation saved for review."
+                    }
                 }
             }
         } else {
