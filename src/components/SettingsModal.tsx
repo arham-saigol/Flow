@@ -1,18 +1,26 @@
-import { type RefObject, useEffect, useState } from "react";
+import { type RefObject, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   AudioLines,
   Check,
+  Download,
   Eye,
   EyeOff,
   Keyboard,
   KeyRound,
   LoaderCircle,
+  Mic,
+  RefreshCw,
+  ShieldCheck,
   SlidersHorizontal,
+  Trash2,
 } from "lucide-react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { useDialogFocus } from "../hooks/useDialogFocus";
-import type { Microphone, SettingsData } from "../types";
+import type { AppConfig, Microphone, SettingsData } from "../types";
 import type { ToastData } from "./Toast";
+import { PrivacyNoticeModal } from "./PrivacyNoticeModal";
 
 const defaults: SettingsData = {
   has_api_key: false,
@@ -21,17 +29,7 @@ const defaults: SettingsData = {
   keybind: "Right Alt",
   launch_at_startup: false,
   history_retention: "30 days",
-};
-
-const supportedHotkeys: Record<string, string> = {
-  AltRight: "Right Alt",
-  AltLeft: "Left Alt",
-  ControlRight: "Right Ctrl",
-  F8: "F8",
-  F9: "F9",
-  F10: "F10",
-  F11: "F11",
-  F12: "F12",
+  privacy_notice_version: null,
 };
 
 export function SettingsModal({
@@ -56,15 +54,76 @@ export function SettingsModal({
   const [activeTab, setActiveTab] = useState<"general" | "transcription">("general");
   const [capturingHotkey, setCapturingHotkey] = useState(false);
   const [hotkeyError, setHotkeyError] = useState("");
+
+  // New states
+  const [testingMic, setTestingMic] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const [confirmRemoveKey, setConfirmRemoveKey] = useState(false);
+  const [appConfig, setAppConfig] = useState<AppConfig | null>(null);
+  const [privacyOpen, setPrivacyOpen] = useState(false);
+  const privacyButtonRef = useRef<HTMLButtonElement>(null);
+  const generalTabRef = useRef<HTMLButtonElement>(null);
+  const transcriptionTabRef = useRef<HTMLButtonElement>(null);
+
+  const testingMicRef = useRef(testingMic);
+  const capturingHotkeyRef = useRef(capturingHotkey);
+
+  // Sync refs after commit (not during render) so the unmount cleanup below
+  // observes only values from committed renders.
+  useEffect(() => {
+    testingMicRef.current = testingMic;
+  }, [testingMic]);
+  useEffect(() => {
+    capturingHotkeyRef.current = capturingHotkey;
+  }, [capturingHotkey]);
+
+  const handleTabKeyDown = (e: React.KeyboardEvent, current: "general" | "transcription") => {
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+      e.preventDefault();
+      if (current === "general") {
+        setActiveTab("transcription");
+        transcriptionTabRef.current?.focus();
+      } else {
+        setActiveTab("general");
+        generalTabRef.current?.focus();
+      }
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (current === "general") {
+        setActiveTab("transcription");
+        transcriptionTabRef.current?.focus();
+      } else {
+        setActiveTab("general");
+        generalTabRef.current?.focus();
+      }
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      setActiveTab("general");
+      generalTabRef.current?.focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      setActiveTab("transcription");
+      transcriptionTabRef.current?.focus();
+    }
+  };
+
   const dialogRef = useDialogFocus(true, returnFocusRef, () => {
     if (saving) return;
     if (capturingHotkey) {
+      void api.cancelShortcutCapture();
       setCapturingHotkey(false);
       setHotkeyError("");
     } else {
       onClose();
     }
   });
+
+  const loadMicrophones = () => {
+    void api
+      .microphones()
+      .then(setMicrophones)
+      .catch((error) => notify({ kind: "error", message: String(error) }));
+  };
 
   useEffect(() => {
     void api
@@ -74,11 +133,123 @@ export function SettingsModal({
         setSettingsLoaded(true);
       })
       .catch((error) => notify({ kind: "error", message: String(error) }));
+
+    loadMicrophones();
+
     void api
-      .microphones()
-      .then(setMicrophones)
-      .catch((error) => notify({ kind: "error", message: String(error) }));
+      .appConfig()
+      .then(setAppConfig)
+      .catch(() => {});
+
+    const onFocus = () => loadMicrophones();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   }, [notify]);
+
+  // Shortcut capture listener
+  useEffect(() => {
+    if (!capturingHotkey) return;
+
+    let disposed = false;
+    let unlistenCapture: UnlistenFn | undefined;
+    let unlistenCancel: UnlistenFn | undefined;
+
+    void listen<{ keybind: string }>("shortcut-captured", (event) => {
+      setSettings((current) => ({ ...current, keybind: event.payload.keybind }));
+      setCapturingHotkey(false);
+      setHotkeyError("");
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenCapture = fn;
+    });
+
+    void listen("shortcut-capture-cancelled", () => {
+      setCapturingHotkey(false);
+      setHotkeyError("");
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenCancel = fn;
+    });
+
+    return () => {
+      disposed = true;
+      unlistenCapture?.();
+      unlistenCancel?.();
+    };
+  }, [capturingHotkey]);
+
+  // Microphone test listener
+  useEffect(() => {
+    if (!testingMic) {
+      setMicLevel(0);
+      return;
+    }
+
+    let disposed = false;
+    let unlistenLevel: UnlistenFn | undefined;
+    void listen<{ level: number }>("audio-level", (event) => {
+      setMicLevel(Math.max(0, Math.min(1, event.payload.level)));
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenLevel = fn;
+    });
+
+    return () => {
+      disposed = true;
+      unlistenLevel?.();
+    };
+  }, [testingMic]);
+
+  // Clean up mic test on unmount
+  useEffect(() => {
+    return () => {
+      if (testingMicRef.current) {
+        void api.stopMicrophoneTest();
+      }
+      if (capturingHotkeyRef.current) {
+        void api.cancelShortcutCapture();
+      }
+    };
+  }, []);
+
+  const toggleMicTest = async () => {
+    if (testingMic) {
+      try {
+        await api.stopMicrophoneTest();
+      } catch (err) {
+        console.error(err);
+      }
+      setTestingMic(false);
+    } else {
+      try {
+        await api.startMicrophoneTest(settings.microphone_id);
+        setTestingMic(true);
+      } catch (err) {
+        notify({ kind: "error", message: String(err) });
+      }
+    }
+  };
+
+  const startCapturing = async () => {
+    setCapturingHotkey(true);
+    setHotkeyError("");
+    try {
+      await api.startShortcutCapture();
+    } catch (err) {
+      setCapturingHotkey(false);
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const cancelCapturing = async () => {
+    setCapturingHotkey(false);
+    setHotkeyError("");
+    try {
+      await api.cancelShortcutCapture();
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   const test = async () => {
     if (!apiKey) return;
@@ -97,6 +268,10 @@ export function SettingsModal({
 
   const save = async () => {
     if (!settingsLoaded) return;
+    if (testingMic) {
+      await api.stopMicrophoneTest().catch(() => {});
+      setTestingMic(false);
+    }
     setSaving(true);
     try {
       const selected = microphones.find((item) => item.id === settings.microphone_id);
@@ -119,191 +294,415 @@ export function SettingsModal({
     }
   };
 
-  const captureHotkey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (!capturingHotkey) return;
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.key === "Escape") {
-      setCapturingHotkey(false);
-      setHotkeyError("");
-      event.currentTarget.blur();
-      return;
+  const handleRemoveApiKey = async () => {
+    try {
+      await api.deleteApiKey();
+      setSettings((current) => ({ ...current, has_api_key: false }));
+      setApiKey("");
+      setConfirmRemoveKey(false);
+      notify({ kind: "success", message: "API key removed from Windows Credential Manager" });
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
     }
-    const keybind = supportedHotkeys[event.code];
-    if (!keybind) {
-      setHotkeyError("Use Left or Right Alt, Right Ctrl, or F8–F12.");
-      return;
-    }
-    setSettings((current) => ({ ...current, keybind }));
-    setCapturingHotkey(false);
-    setHotkeyError("");
-    event.currentTarget.blur();
   };
 
-  return (
-    <div
-      className="modal-backdrop"
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target !== event.currentTarget) return;
-        if (saving) return;
-        if (capturingHotkey) {
-          setCapturingHotkey(false);
-          setHotkeyError("");
-        } else {
-          onClose();
-        }
-      }}
-    >
-      <section
-        ref={dialogRef}
-        className="settings-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="settings-title"
-        tabIndex={-1}
+  const handleExportDiagnostics = async () => {
+    try {
+      const logs = await api.exportDiagnostics();
+      await api.copyText(logs);
+      notify({ kind: "success", message: "Diagnostic logs copied to clipboard" });
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const handleDeleteUpgradeBackup = async () => {
+    try {
+      await api.deleteUpgradeBackup();
+      setAppConfig((c) => c ? { ...c, backup_file: null, backup_expires_at: null } : null);
+      notify({ kind: "success", message: "Database upgrade backup deleted" });
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (!window.confirm("Are you sure you want to delete all dictation history? This cannot be undone.")) {
+      return;
+    }
+    try {
+      await api.deleteAllHistory(false);
+      notify({ kind: "success", message: "Dictation history cleared" });
+      onSaved(settings.keybind);
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const handleResetStats = async () => {
+    if (!window.confirm("Reset aggregate statistics counter?")) {
+      return;
+    }
+    try {
+      await api.resetStatistics();
+      notify({ kind: "success", message: "Statistics reset" });
+      onSaved(settings.keybind);
+    } catch (err) {
+      notify({ kind: "error", message: String(err) });
+    }
+  };
+
+  const modalRoot =
+    typeof document !== "undefined"
+      ? document.getElementById("modal-root") || document.body
+      : null;
+
+  if (!modalRoot) return null;
+
+  return createPortal(
+    <>
+      <div
+        className="modal-backdrop"
+        role="presentation"
+        onMouseDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          if (saving) return;
+          if (capturingHotkey) {
+            void cancelCapturing();
+          } else {
+            onClose();
+          }
+        }}
       >
-        <header>
-          <h2 id="settings-title">Settings</h2>
-        </header>
+        <section
+          ref={dialogRef}
+          className="settings-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="settings-title"
+          tabIndex={-1}
+        >
+          <header>
+            <h2 id="settings-title">Settings</h2>
+          </header>
 
-        <div className="settings-layout">
-          <nav className="settings-tabs" aria-label="Settings sections" role="tablist">
-            <button
-              id="settings-general-tab"
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "general"}
-              aria-controls="settings-panel"
-              className={activeTab === "general" ? "active" : ""}
-              onClick={() => setActiveTab("general")}
+          <div className="settings-layout">
+            <nav className="settings-tabs" aria-label="Settings sections" role="tablist">
+              <button
+                ref={generalTabRef}
+                id="settings-general-tab"
+                type="button"
+                role="tab"
+                tabIndex={activeTab === "general" ? 0 : -1}
+                aria-selected={activeTab === "general"}
+                aria-controls="settings-panel"
+                className={activeTab === "general" ? "active" : ""}
+                onClick={() => setActiveTab("general")}
+                onKeyDown={(e) => handleTabKeyDown(e, "general")}
+              >
+                <SlidersHorizontal size={16} />
+                <span>General</span>
+              </button>
+              <button
+                ref={transcriptionTabRef}
+                id="settings-transcription-tab"
+                type="button"
+                role="tab"
+                tabIndex={activeTab === "transcription" ? 0 : -1}
+                aria-selected={activeTab === "transcription"}
+                aria-controls="settings-panel"
+                className={activeTab === "transcription" ? "active" : ""}
+                onClick={() => setActiveTab("transcription")}
+                onKeyDown={(e) => handleTabKeyDown(e, "transcription")}
+              >
+                <AudioLines size={16} />
+                <span>Transcription</span>
+              </button>
+            </nav>
+
+            <div
+              id="settings-panel"
+              className="settings-pane"
+              role="tabpanel"
+              aria-labelledby={`settings-${activeTab}-tab`}
             >
-              <SlidersHorizontal size={16} />
-              <span>General</span>
-            </button>
-            <button
-              id="settings-transcription-tab"
-              type="button"
-              role="tab"
-              aria-selected={activeTab === "transcription"}
-              aria-controls="settings-panel"
-              className={activeTab === "transcription" ? "active" : ""}
-              onClick={() => setActiveTab("transcription")}
-            >
-              <AudioLines size={16} />
-              <span>Transcription</span>
-            </button>
-          </nav>
-
-          <div
-            id="settings-panel"
-            className="settings-pane"
-            role="tabpanel"
-            aria-labelledby={`settings-${activeTab}-tab`}
-          >
-            {activeTab === "general" ? (
-              <>
-                <div className="settings-pane__heading">
-                  <h3>General</h3>
-                  <p>Choose how Flow listens, starts, and stores your history.</p>
-                </div>
-
-                <div className="settings-form-grid">
-                  <label className="field">
-                    <span>Microphone</span>
-                    <select value={settings.microphone_id} onChange={(e) => setSettings({ ...settings, microphone_id: e.target.value })}>
-                      <option value="">System default</option>
-                      {microphones.map((microphone) => <option value={microphone.id} key={microphone.id}>{microphone.name}</option>)}
-                    </select>
-                  </label>
-
-                  <label className="field">
-                    <span>History retention</span>
-                    <select value={settings.history_retention} onChange={(e) => setSettings({ ...settings, history_retention: e.target.value })}>
-                      {["24 hours", "7 days", "30 days", "Forever"].map((value) => <option key={value}>{value}</option>)}
-                    </select>
-                  </label>
-
-                  <div className="field field--wide">
-                    <span>Dictation shortcut</span>
-                    <button
-                      className={`hotkey-capture ${capturingHotkey ? "is-capturing" : ""}`}
-                      type="button"
-                      aria-pressed={capturingHotkey}
-                      onClick={() => {
-                        setCapturingHotkey(true);
-                        setHotkeyError("");
-                      }}
-                      onKeyDown={captureHotkey}
-                      onBlur={() => {
-                        setCapturingHotkey(false);
-                        setHotkeyError("");
-                      }}
-                    >
-                      <Keyboard size={16} />
-                      <span>{capturingHotkey ? "Press a key…" : settings.keybind}</span>
-                    </button>
-                    <small>
-                      {hotkeyError || (capturingHotkey
-                        ? "Press Escape or click elsewhere to cancel."
-                        : "Click to record a different shortcut.")}
-                    </small>
+              {activeTab === "general" ? (
+                <>
+                  <div className="settings-pane__heading">
+                    <h3>General</h3>
+                    <p>Choose how Flow listens, starts, and stores your history.</p>
                   </div>
 
-                  <label className="toggle-row field--wide">
-                    <div>
-                      <span>Launch at startup</span>
-                      <p>Keep Flow ready in the system tray.</p>
+                  <div className="settings-form-grid">
+                    <div className="field">
+                      <div className="field__header">
+                        <span>Microphone</span>
+                        <div className="field__actions">
+                          <button
+                            type="button"
+                            onClick={loadMicrophones}
+                            title="Refresh microphones"
+                            aria-label="Refresh microphone list"
+                            className="icon-button"
+                          >
+                            <RefreshCw size={13} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void toggleMicTest()}
+                            className={
+                              testingMic ? "mic-test-button is-active" : "mic-test-button"
+                            }
+                          >
+                            {testingMic ? "Stop Test" : "Test Mic"}
+                          </button>
+                        </div>
+                      </div>
+                      <select
+                        value={settings.microphone_id}
+                        onChange={(e) =>
+                          setSettings({ ...settings, microphone_id: e.target.value })
+                        }
+                      >
+                        <option value="">System default</option>
+                        {settings.microphone_id &&
+                          !microphones.some((m) => m.id === settings.microphone_id) && (
+                            <option value={settings.microphone_id} disabled>
+                              {settings.microphone_name || "Saved microphone"} (Unavailable)
+                            </option>
+                          )}
+                        {microphones.map((microphone) => (
+                          <option value={microphone.id} key={microphone.id}>
+                            {microphone.name}{!microphone.is_available ? " (Unavailable)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                      {testingMic && (
+                        <div className="input-meter">
+                          <div className="input-meter__label">
+                            <span className="input-meter__title">
+                              <Mic size={11} />
+                              Input Level
+                            </span>
+                            <span>{Math.round(micLevel * 100)}%</span>
+                          </div>
+                          <div className="input-meter__track">
+                            <div
+                              className="input-meter__fill"
+                              style={{ width: `${Math.min(100, micLevel * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <input type="checkbox" checked={settings.launch_at_startup} onChange={(e) => setSettings({ ...settings, launch_at_startup: e.target.checked })} />
-                  </label>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="settings-pane__heading">
-                  <h3>Transcription</h3>
-                  <p>Connect the service Flow uses for transcription and writing cleanup.</p>
-                </div>
 
-                <div className="settings-transcription">
-                  <label className="field">
-                    <span>Groq API key</span>
-                    <div className="secret-field">
-                      <KeyRound size={16} />
-                      <input
-                        type={showKey ? "text" : "password"}
-                        value={apiKey}
-                        autoComplete="off"
-                        placeholder={settings.has_api_key ? "Saved securely ••••••••" : "gsk_…"}
-                        onChange={(e) => {
-                          setApiKey(e.target.value);
-                          setTested(false);
+                    <label className="field">
+                      <span>History retention</span>
+                      <select
+                        value={settings.history_retention}
+                        onChange={(e) =>
+                          setSettings({ ...settings, history_retention: e.target.value })
+                        }
+                      >
+                        {["24 hours", "7 days", "30 days", "Forever"].map((value) => (
+                          <option key={value}>{value}</option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div className="field field--wide">
+                      <span>Dictation shortcut</span>
+                      <button
+                        className={`hotkey-capture ${capturingHotkey ? "is-capturing" : ""}`}
+                        type="button"
+                        aria-pressed={capturingHotkey}
+                        onClick={() => {
+                          if (capturingHotkey) {
+                            void cancelCapturing();
+                          } else {
+                            void startCapturing();
+                          }
                         }}
-                      />
-                      <button type="button" aria-label={showKey ? "Hide API key" : "Show API key"} onClick={() => setShowKey((value) => !value)}>
-                        {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                      >
+                        <Keyboard size={16} />
+                        <span>{capturingHotkey ? "Press hotkey (e.g. Right Alt, F8)…" : settings.keybind}</span>
                       </button>
+                      <small>
+                        {hotkeyError ||
+                          (capturingHotkey
+                            ? "Press Escape to cancel."
+                            : "Click to record a shortcut (Right Alt, Left Alt, Right Ctrl, or F8–F12).")}
+                      </small>
                     </div>
-                  </label>
-                  <button className="secondary-button compact" disabled={!apiKey || testing} onClick={() => void test()}>
-                    {testing ? <LoaderCircle className="spin" size={15} /> : tested ? <Check size={15} /> : null}
-                    {testing ? "Checking…" : tested ? "Connected" : "Test connection"}
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
 
-        <footer>
-          <button className="secondary-button" disabled={saving} onClick={onClose}>Cancel</button>
-          <button className="primary-button" disabled={!settingsLoaded || saving} onClick={() => void save()}>
-            {saving && <LoaderCircle className="spin" size={16} />}
-            {saving ? "Saving…" : "Save settings"}
-          </button>
-        </footer>
-      </section>
-    </div>
+                    <label className="toggle-row field--wide">
+                      <div>
+                        <span>Launch at startup</span>
+                        <p>Keep Flow ready in the system tray.</p>
+                      </div>
+                      <input
+                        type="checkbox"
+                        checked={settings.launch_at_startup}
+                        onChange={(e) =>
+                          setSettings({ ...settings, launch_at_startup: e.target.checked })
+                        }
+                      />
+                    </label>
+
+                    {/* Data Management & Diagnostics */}
+                    <div className="field field--wide field--storage">
+                      <span className="storage-heading">
+                        Storage & Diagnostics
+                      </span>
+                      <div className="storage-actions">
+                        <button
+                          type="button"
+                          className="secondary-button compact"
+                          onClick={() => void handleExportDiagnostics()}
+                        >
+                          <Download size={13} />
+                          Export Logs
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact"
+                          onClick={() => void handleClearHistory()}
+                        >
+                          <Trash2 size={13} />
+                          Clear History
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button compact"
+                          onClick={() => void handleResetStats()}
+                        >
+                          Reset Stats
+                        </button>
+                        {appConfig?.backup_file && (
+                          <button
+                            type="button"
+                            className="secondary-button compact warning"
+                            onClick={() => void handleDeleteUpgradeBackup()}
+                          >
+                            Delete Upgrade Backup
+                          </button>
+                        )}
+                        <button
+                          ref={privacyButtonRef}
+                          type="button"
+                          className="secondary-button compact muted"
+                          onClick={() => setPrivacyOpen(true)}
+                        >
+                          <ShieldCheck size={13} />
+                          Privacy Notice
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="settings-pane__heading">
+                    <h3>Transcription</h3>
+                    <p>Connect the service Flow uses for transcription and writing cleanup.</p>
+                  </div>
+
+                  <div className="settings-transcription">
+                    <label className="field">
+                      <span>Groq API key</span>
+                      <div className="secret-field">
+                        <KeyRound size={16} />
+                        <input
+                          type={showKey ? "text" : "password"}
+                          value={apiKey}
+                          autoComplete="off"
+                          placeholder={settings.has_api_key ? "Saved securely ••••••••" : "gsk_…"}
+                          onChange={(e) => {
+                            setApiKey(e.target.value);
+                            setTested(false);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          aria-label={showKey ? "Hide API key" : "Show API key"}
+                          onClick={() => setShowKey((value) => !value)}
+                        >
+                          {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                    </label>
+                    <div className="api-key-actions">
+                      <button
+                        className="secondary-button compact"
+                        disabled={!apiKey || testing}
+                        onClick={() => void test()}
+                      >
+                        {testing ? (
+                          <LoaderCircle className="spin" size={15} />
+                        ) : tested ? (
+                          <Check size={15} />
+                        ) : null}
+                        {testing ? "Checking…" : tested ? "Connected" : "Test connection"}
+                      </button>
+
+                      {settings.has_api_key && !confirmRemoveKey && (
+                        <button
+                          type="button"
+                          className="secondary-button compact danger"
+                          onClick={() => setConfirmRemoveKey(true)}
+                        >
+                          Remove saved key
+                        </button>
+                      )}
+
+                      {confirmRemoveKey && (
+                        <div className="confirm-remove">
+                          <span className="confirm-remove__label">Confirm delete?</span>
+                          <button
+                            type="button"
+                            className="confirm-remove__confirm"
+                            onClick={() => void handleRemoveApiKey()}
+                          >
+                            Yes, remove
+                          </button>
+                          <button
+                            type="button"
+                            className="confirm-remove__cancel"
+                            onClick={() => setConfirmRemoveKey(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <footer>
+            <button className="secondary-button" disabled={saving} onClick={onClose}>
+              Cancel
+            </button>
+            <button
+              className="primary-button"
+              disabled={!settingsLoaded || saving}
+              onClick={() => void save()}
+            >
+              {saving && <LoaderCircle className="spin" size={16} />}
+              {saving ? "Saving…" : "Save settings"}
+            </button>
+          </footer>
+        </section>
+      </div>
+
+      <PrivacyNoticeModal
+        open={privacyOpen}
+        onAccept={() => setPrivacyOpen(false)}
+        returnFocusRef={privacyButtonRef}
+      />
+    </>,
+    modalRoot,
   );
 }

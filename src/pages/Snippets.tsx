@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Command, Pencil, Trash2 } from "lucide-react";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
@@ -73,59 +74,61 @@ function SnippetRow({
         </button>
       </div>
 
-      {editing && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && close()}
-        >
-          <section
-            ref={dialogRef}
-            className="creation-dialog creation-dialog--snippet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={`edit-snippet-${snippet.id}`}
+      {editing &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => event.target === event.currentTarget && close()}
           >
-            <header>
-              <h2 id={`edit-snippet-${snippet.id}`}>Edit snippet</h2>
-            </header>
-            <form onSubmit={(event) => void save(event)}>
-              <div className="creation-dialog__body snippet-dialog__body">
-                <input
-                  aria-label="Snippet trigger"
-                  autoFocus
-                  value={trigger}
-                  maxLength={120}
-                  disabled={saving}
-                  onChange={(event) => setTrigger(event.target.value)}
-                />
-                <div className="snippet-expansion">
-                  <textarea
-                    aria-label="Snippet expansion"
-                    value={content}
-                    maxLength={4000}
+            <section
+              ref={dialogRef}
+              className="creation-dialog creation-dialog--snippet"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={`edit-snippet-${snippet.id}`}
+            >
+              <header>
+                <h2 id={`edit-snippet-${snippet.id}`}>Edit snippet</h2>
+              </header>
+              <form onSubmit={(event) => void save(event)}>
+                <div className="creation-dialog__body snippet-dialog__body">
+                  <input
+                    aria-label="Snippet trigger"
+                    autoFocus
+                    value={trigger}
+                    maxLength={120}
                     disabled={saving}
-                    onChange={(event) => setContent(event.target.value)}
+                    onChange={(event) => setTrigger(event.target.value)}
                   />
-                  <span>{content.length}/4000</span>
+                  <div className="snippet-expansion">
+                    <textarea
+                      aria-label="Snippet expansion"
+                      value={content}
+                      maxLength={4000}
+                      disabled={saving}
+                      onChange={(event) => setContent(event.target.value)}
+                    />
+                    <span>{content.length}/4000</span>
+                  </div>
                 </div>
-              </div>
-              <footer>
-                <button className="secondary-button" type="button" disabled={saving} onClick={close}>
-                  Cancel
-                </button>
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={!trigger.trim() || !content.trim() || saving}
-                >
-                  {saving ? "Saving…" : "Save changes"}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      )}
+                <footer>
+                  <button className="secondary-button" type="button" disabled={saving} onClick={close}>
+                    Cancel
+                  </button>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={!trigger.trim() || !content.trim() || saving}
+                  >
+                    {saving ? "Saving…" : "Save changes"}
+                  </button>
+                </footer>
+              </form>
+            </section>
+          </div>,
+          document.getElementById("modal-root") || document.body,
+        )}
     </article>
   );
 }
@@ -216,67 +219,69 @@ export function Snippets({ notify }: { notify: (data: ToastData) => void }) {
         )}
       </section>
 
-      {addOpen && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
-        >
-          <section
-            ref={dialogRef}
-            className="creation-dialog creation-dialog--snippet"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="add-snippet-title"
+      {addOpen &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
           >
-            <header>
-              <h2 id="add-snippet-title">Add snippet</h2>
-            </header>
+            <section
+              ref={dialogRef}
+              className="creation-dialog creation-dialog--snippet"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-snippet-title"
+            >
+              <header>
+                <h2 id="add-snippet-title">Add snippet</h2>
+              </header>
 
-            <form onSubmit={(event) => void add(event)}>
-              <div className="creation-dialog__body snippet-dialog__body">
-                <input
-                  aria-label="Snippet trigger"
-                  autoFocus
-                  placeholder="Snippet"
-                  value={trigger}
-                  maxLength={120}
-                  disabled={adding}
-                  onChange={(event) => setTrigger(event.target.value)}
-                />
-                <div className="snippet-expansion">
-                  <textarea
-                    aria-label="Snippet expansion"
-                    placeholder="Expansion"
-                    value={content}
-                    maxLength={4000}
+              <form onSubmit={(event) => void add(event)}>
+                <div className="creation-dialog__body snippet-dialog__body">
+                  <input
+                    aria-label="Snippet trigger"
+                    autoFocus
+                    placeholder="Snippet"
+                    value={trigger}
+                    maxLength={120}
                     disabled={adding}
-                    onChange={(event) => setContent(event.target.value)}
+                    onChange={(event) => setTrigger(event.target.value)}
                   />
-                  <span>{content.length}/4000</span>
+                  <div className="snippet-expansion">
+                    <textarea
+                      aria-label="Snippet expansion"
+                      placeholder="Expansion"
+                      value={content}
+                      maxLength={4000}
+                      disabled={adding}
+                      onChange={(event) => setContent(event.target.value)}
+                    />
+                    <span>{content.length}/4000</span>
+                  </div>
                 </div>
-              </div>
-              <footer>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={adding}
-                  onClick={closeAddDialog}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={!trigger.trim() || !content.trim() || adding}
-                >
-                  {adding ? "Adding…" : "Add snippet"}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      )}
+                <footer>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    disabled={adding}
+                    onClick={closeAddDialog}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={!trigger.trim() || !content.trim() || adding}
+                  >
+                    {adding ? "Adding…" : "Add snippet"}
+                  </button>
+                </footer>
+              </form>
+            </section>
+          </div>,
+          document.getElementById("modal-root") || document.body,
+        )}
     </section>
   );
 }

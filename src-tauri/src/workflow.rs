@@ -1,354 +1,1182 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    LazyLock, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder};
 use tauri::{AppHandle, Emitter, Manager};
-use unicode_categories::UnicodeCategories;
+use uuid::Uuid;
 
 use crate::{
     credentials,
     error::{FlowError, Result},
-    models::{DictionaryEntry, MessagePayload, OverlayPayload},
-    platform, AppState,
+    models::{
+        DictionaryEntry, MessagePayload, OverlayPayload, WorkflowPhase, WorkflowStateSnapshot,
+    },
+    platform::{self, TargetWindow},
+    recovery::{self, Disposition, RecoverySpool},
+    text, AppState,
 };
 
-static ERROR_GENERATION: AtomicU64 = AtomicU64::new(0);
-static ERROR_DISMISS_TASK: LazyLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> =
-    LazyLock::new(|| Mutex::new(None));
-static CORRECTION_MATCHER: LazyLock<Mutex<CorrectionMatcherCache>> =
-    LazyLock::new(|| Mutex::new(CorrectionMatcherCache::default()));
+pub struct WorkflowCoordinator {
+    state: Mutex<WorkflowState>,
+    session_counter: AtomicU64,
+    revision_counter: AtomicU64,
+}
 
-#[derive(Default)]
-struct CorrectionMatcherCache {
-    corrections: Vec<(String, String)>,
-    matcher: Option<AhoCorasick>,
+pub struct WorkflowState {
+    pub revision: u64,
+    pub session_id: Option<u64>,
+    pub phase: WorkflowPhase,
+    pub active_pending_id: Option<i64>,
+    pub destination: Option<TargetWindow>,
+    pub cancellation_token: Option<Arc<AtomicBool>>,
+    pub capture_uuid: Option<String>,
+    pub spool: Option<RecoverySpool>,
+    pub message_code: Option<String>,
+}
+
+impl Default for WorkflowCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WorkflowCoordinator {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(WorkflowState {
+                revision: 1,
+                session_id: None,
+                phase: WorkflowPhase::Idle,
+                active_pending_id: None,
+                destination: None,
+                cancellation_token: None,
+                capture_uuid: None,
+                spool: None,
+                message_code: None,
+            }),
+            session_counter: AtomicU64::new(1),
+            revision_counter: AtomicU64::new(1),
+        }
+    }
+
+    pub fn snapshot(&self) -> WorkflowStateSnapshot {
+        let state = self.state.lock().unwrap();
+        self.make_snapshot(&state)
+    }
+
+    fn make_snapshot(&self, state: &WorkflowState) -> WorkflowStateSnapshot {
+        let can_start = state.phase == WorkflowPhase::Idle;
+        let can_stop = state.phase == WorkflowPhase::Recording;
+        let can_cancel = matches!(
+            state.phase,
+            WorkflowPhase::Starting
+                | WorkflowPhase::Recording
+                | WorkflowPhase::Transcribing
+                | WorkflowPhase::Cleaning
+                | WorkflowPhase::Delivering
+        );
+
+        WorkflowStateSnapshot {
+            revision: state.revision,
+            session_id: state.session_id,
+            phase: state.phase,
+            active_pending_id: state.active_pending_id,
+            can_start,
+            can_stop,
+            can_cancel,
+            message_code: state.message_code.clone(),
+        }
+    }
+
+    pub fn next_revision(&self) -> u64 {
+        self.revision_counter.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn next_session(&self) -> u64 {
+        self.session_counter.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub fn active_pending_id(&self) -> Option<i64> {
+        self.state.lock().unwrap().active_pending_id
+    }
+
+    pub fn emit_state(&self, app: &AppHandle) {
+        let snapshot = self.snapshot();
+        let _ = app.emit("workflow-state", &snapshot);
+    }
 }
 
 pub async fn toggle(app: &AppHandle) {
-    toggle_with_target(app, platform::remembered_target()).await;
+    let state = app.state::<AppState>();
+    let phase = state.workflow.state.lock().unwrap().phase;
+    match phase {
+        WorkflowPhase::Recording => {
+            if let Err(err) = stop_and_process(app).await {
+                let _ = app.emit(
+                    "flow-error",
+                    MessagePayload {
+                        message: format!("{err}"),
+                    },
+                );
+            }
+        }
+        WorkflowPhase::Idle => {
+            if let Err(err) = start(app) {
+                let _ = app.emit(
+                    "flow-error",
+                    MessagePayload {
+                        message: format!("{err}"),
+                    },
+                );
+            }
+        }
+        _ => {}
+    }
 }
 
 pub async fn toggle_from_tray(app: &AppHandle) {
-    toggle_with_target(app, platform::remembered_target()).await;
-}
-
-async fn toggle_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) {
-    let state = app.state::<AppState>();
-    if state.recorder.is_recording() {
-        if let Err(error) = stop_and_process_with_target(app, target).await {
-            let _ = reported_error(app, error);
-        }
-    } else if !state.busy.load(Ordering::Acquire) {
-        if let Err(error) = start_with_target(app, target) {
-            let _ = reported_error(app, error);
-        }
-    }
+    toggle(app).await;
 }
 
 pub fn start(app: &AppHandle) -> Result<()> {
-    start_with_target(app, None).map_err(|error| reported_error(app, error))
-}
-
-fn start_with_target(app: &AppHandle, target: Option<platform::TargetWindow>) -> Result<()> {
     let state = app.state::<AppState>();
-    if state.busy.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::AlreadyRecording);
-    }
-    ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
-    cancel_error_dismiss();
-    let result = (|| {
-        let has_key = credentials::has_api_key();
-        if !has_key {
+    let (session_id, _capture_uuid, _spool_dir, mic_id) = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        match wf.phase {
+            WorkflowPhase::Starting | WorkflowPhase::Recording => return Ok(()),
+            WorkflowPhase::Faulted => {
+                return Err(FlowError::Message(
+                    "The microphone is not responding. Restart Flow to reconnect it.".into(),
+                ));
+            }
+            WorkflowPhase::Idle => {}
+            _ => return Err(FlowError::Busy),
+        }
+
+        let settings = state.database.settings(true)?;
+        if settings.privacy_notice_version.is_none() {
+            return Err(FlowError::Message(
+                "Please review and acknowledge the privacy notice before dictating.".into(),
+            ));
+        }
+
+        if !credentials::has_api_key() {
             return Err(FlowError::MissingApiKey);
         }
-        let settings = state.database.settings(true)?;
-        let target = target.unwrap_or_else(platform::capture_target);
-        platform::prepare_overlay(app, target)?;
-        emit_overlay(app, "recording", None);
-        state
-            .recorder
-            .start(app.clone(), &settings.microphone_id, target)?;
-        platform::set_recording(true);
-        Ok(())
-    })();
-    if result.is_err() {
-        state.busy.store(false, Ordering::Release);
+
+        let app_data = app.path().app_data_dir().map_err(|e| {
+            FlowError::Message(format!("Could not locate Flow app data directory: {e}"))
+        })?;
+        let recovery_dir = app_data.join("recovery");
+
+        // Quota check
+        state.database.check_recovery_quota(0, 0)?;
+
+        let session_id = state.workflow.next_session();
+        let capture_uuid = Uuid::new_v4().to_string();
+        let spool = RecoverySpool::new(&recovery_dir, &capture_uuid)?;
+
+        wf.phase = WorkflowPhase::Starting;
+        wf.session_id = Some(session_id);
+        wf.revision = state.workflow.next_revision();
+        wf.capture_uuid = Some(capture_uuid.clone());
+        wf.spool = Some(spool);
+        wf.cancellation_token = Some(Arc::new(AtomicBool::new(false)));
+        wf.message_code = None;
+
+        (
+            session_id,
+            capture_uuid,
+            recovery_dir,
+            settings.microphone_id,
+        )
+    };
+
+    state.workflow.emit_state(app);
+
+    let target = platform::capture_target_with_session(session_id);
+    let _ = platform::prepare_overlay(app, target);
+    emit_overlay(app, "recording", None);
+
+    let spool_to_start = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        wf.spool.take()
+    };
+
+    let start_res = state
+        .recorder
+        .start(session_id, app.clone(), &mic_id, target, spool_to_start);
+    match start_res {
+        Ok(()) => {
+            {
+                let mut wf = state.workflow.state.lock().unwrap();
+                if wf.session_id == Some(session_id) && wf.phase == WorkflowPhase::Starting {
+                    wf.phase = WorkflowPhase::Recording;
+                    wf.destination = Some(target);
+                    wf.revision = state.workflow.next_revision();
+                }
+            }
+            platform::set_recording(true);
+            state.workflow.emit_state(app);
+            Ok(())
+        }
+        Err(err) => {
+            let abandoned_uuid = {
+                let mut wf = state.workflow.state.lock().unwrap();
+                if wf.session_id == Some(session_id) {
+                    let capture_uuid = wf.capture_uuid.take();
+                    wf.phase = WorkflowPhase::Idle;
+                    wf.session_id = None;
+                    wf.spool = None;
+                    wf.cancellation_token = None;
+                    wf.revision = state.workflow.next_revision();
+                    capture_uuid
+                } else {
+                    None
+                }
+            };
+            // The queued Start consumed the RecoverySpool, so it is no longer
+            // reachable here; mark it cancelled and clean up by capture UUID so
+            // abandoned spool files cannot import as recovered dictations.
+            if let Some(uuid) = abandoned_uuid {
+                discard_abandoned_spool(app, &uuid);
+            }
+            platform::set_recording(false);
+            state.workflow.emit_state(app);
+            hide_overlay(app);
+            Err(err)
+        }
     }
-    result
 }
 
 pub async fn stop_and_process(app: &AppHandle) -> Result<()> {
-    stop_and_process_with_target(app, Some(platform::capture_target()))
-        .await
-        .map_err(|error| reported_error(app, error))
-}
-
-async fn stop_and_process_with_target(
-    app: &AppHandle,
-    target: Option<platform::TargetWindow>,
-) -> Result<()> {
     let state = app.state::<AppState>();
-    if !state.recorder.is_recording() {
-        return if state.capture_limit_processing.load(Ordering::Acquire) {
-            Ok(())
-        } else {
-            Err(FlowError::NotRecording)
-        };
-    }
-    if state.processing.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::Message(
-            "Flow is already processing a dictation.".into(),
-        ));
-    }
-    platform::set_recording(false);
-    let recording = match state.recorder.stop() {
-        Ok(recording) => recording,
-        Err(error) => {
-            if matches!(error, FlowError::NotRecording)
-                && state.capture_limit_processing.load(Ordering::Acquire)
-            {
-                return Ok(());
-            }
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
-            return Err(error);
+    let (session_id, capture_uuid, cancel_token, target) = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        match wf.phase {
+            WorkflowPhase::Stopping
+            | WorkflowPhase::Transcribing
+            | WorkflowPhase::Cleaning
+            | WorkflowPhase::Delivering => return Ok(()),
+            WorkflowPhase::Recording => {}
+            _ => return Err(FlowError::NotRecording),
         }
+
+        let session_id = wf.session_id.ok_or(FlowError::NotRecording)?;
+        let capture_uuid = wf
+            .capture_uuid
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let cancel_token = wf
+            .cancellation_token
+            .clone()
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
+        let initial_destination = wf.destination;
+        let stop_target = platform::capture_target_with_session(session_id);
+        let destination_target = if stop_target.hwnd != 0 && !platform::is_flow_window(stop_target.hwnd) {
+            stop_target
+        } else if let Some(dest) = initial_destination {
+            if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
+                dest
+            } else {
+                platform::remembered_target().unwrap_or(stop_target)
+            }
+        } else {
+            platform::remembered_target().unwrap_or(stop_target)
+        };
+
+        wf.phase = WorkflowPhase::Stopping;
+        wf.destination = Some(destination_target);
+        wf.revision = state.workflow.next_revision();
+
+        (session_id, capture_uuid, cancel_token, destination_target)
     };
-    process_captured_inner(app, recording, target).await
+
+    platform::set_recording(false);
+    state.workflow.emit_state(app);
+
+    let stop_res = state.recorder.stop(session_id);
+    match stop_res {
+        Ok(captured) => {
+            let app_clone = app.clone();
+            tauri::async_runtime::spawn(async move {
+                process_captured(
+                    &app_clone,
+                    session_id,
+                    capture_uuid,
+                    cancel_token,
+                    captured,
+                    target,
+                )
+                .await;
+            });
+            Ok(())
+        }
+        Err(err) => {
+            {
+                let mut wf = state.workflow.state.lock().unwrap();
+                if wf.session_id == Some(session_id) {
+                    wf.phase = WorkflowPhase::Idle;
+                    wf.session_id = None;
+                    wf.revision = state.workflow.next_revision();
+                }
+            }
+            state.workflow.emit_state(app);
+            hide_overlay(app);
+            Err(err)
+        }
+    }
 }
 
 pub(crate) fn process_captured_in_background(
     app: &AppHandle,
-    recording: crate::audio::CapturedAudio,
+    captured: crate::audio::CapturedAudio,
 ) {
     let state = app.state::<AppState>();
-    state
-        .capture_limit_processing
-        .store(true, Ordering::Release);
-    state.processing.store(true, Ordering::Release);
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let result = process_captured_inner(&app, recording, None).await;
-        app.state::<AppState>()
-            .capture_limit_processing
-            .store(false, Ordering::Release);
-        if let Err(error) = result {
-            report_error(&app, error);
+    let (session_id, capture_uuid, cancel_token, destination) = {
+        let wf = state.workflow.state.lock().unwrap();
+        (
+            wf.session_id.unwrap_or(0),
+            wf.capture_uuid
+                .clone()
+                .unwrap_or_else(|| Uuid::new_v4().to_string()),
+            wf.cancellation_token
+                .clone()
+                .unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
+            wf.destination,
+        )
+    };
+    let app_clone = app.clone();
+    let bg_target = platform::capture_target_with_session(session_id);
+    let target = if bg_target.hwnd != 0 && !platform::is_flow_window(bg_target.hwnd) {
+        bg_target
+    } else if let Some(dest) = destination {
+        if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
+            dest
+        } else {
+            platform::remembered_target().unwrap_or(bg_target)
         }
+    } else {
+        platform::remembered_target().unwrap_or(bg_target)
+    };
+    tauri::async_runtime::spawn(async move {
+        process_captured(
+            &app_clone,
+            session_id,
+            capture_uuid,
+            cancel_token,
+            captured,
+            target,
+        )
+        .await;
     });
 }
 
-async fn process_captured_inner(
+async fn process_captured(
     app: &AppHandle,
-    recording: crate::audio::CapturedAudio,
-    target: Option<platform::TargetWindow>,
-) -> Result<()> {
+    session_id: u64,
+    capture_uuid: String,
+    cancel_token: Arc<AtomicBool>,
+    captured: crate::audio::CapturedAudio,
+    target: TargetWindow,
+) {
+    if cancel_token.load(Ordering::Acquire) {
+        return;
+    }
+
     let state = app.state::<AppState>();
-    // Capture the destination when dictation is stopped. Processing may take
-    // several seconds, during which the foreground window can change again.
-    let paste_target = target.unwrap_or(recording.target);
-    let pending_id = match state
-        .database
-        .insert_pending_recording(&recording.wav, recording.duration_ms)
-    {
+
+    // Task 7: Stop limit reached -> save as copy_only pending item for review, do not call Groq or paste
+    if captured.limit_reached {
+        if let Err(e) = state.database.insert_pending_recording(
+            &capture_uuid,
+            &captured.wav,
+            captured.duration_ms,
+            true,
+            Some("limit_reached"),
+            "copy_only",
+        ) {
+            // Inform the user before the workflow transitions to Idle and the
+            // overlay hides; the capture would otherwise be lost silently.
+            report_error(app, e, Some(session_id));
+            return;
+        }
+        {
+            let mut wf = state.workflow.state.lock().unwrap();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.cancellation_token = None;
+                wf.revision = state.workflow.next_revision();
+            }
+        }
+        platform::set_recording(false);
+        state.workflow.emit_state(app);
+        hide_overlay(app);
+        return;
+    }
+
+    let delivery_mode = if captured.partial {
+        "copy_only"
+    } else {
+        "automatic"
+    };
+
+    let review_reason = if captured.partial {
+        Some("partial_capture")
+    } else {
+        None
+    };
+
+    let insert_res = state.database.insert_pending_recording(
+        &capture_uuid,
+        &captured.wav,
+        captured.duration_ms,
+        captured.partial,
+        review_reason,
+        delivery_mode,
+    );
+
+    let pending_id = match insert_res {
         Ok(id) => id,
-        Err(error) => {
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
-            return Err(error);
+        Err(e) => {
+            report_error(app, e, Some(session_id));
+            return;
         }
     };
-    run_pending(app, pending_id, Some(paste_target)).await
-}
 
-pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
-    retry_pending_inner(app, id)
-        .await
-        .map_err(|error| reported_error(app, error))
-}
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.active_pending_id = Some(pending_id);
+            wf.phase = WorkflowPhase::Transcribing;
+            wf.revision = state.workflow.next_revision();
+        }
+    }
+    state.workflow.emit_state(app);
+    emit_overlay(app, "analysing", Some("Analyzing"));
 
-async fn retry_pending_inner(app: &AppHandle, id: i64) -> Result<()> {
-    let state = app.state::<AppState>();
-    if state.busy.swap(true, Ordering::AcqRel) {
-        return Err(FlowError::Message(
-            "Flow is busy with another dictation.".into(),
-        ));
+    if let Err(e) = run_pending(app, session_id, pending_id, Some(target), delivery_mode).await {
+        report_error(app, e, Some(session_id));
     }
-    if state.processing.swap(true, Ordering::AcqRel) {
-        state.busy.store(false, Ordering::Release);
-        return Err(FlowError::Message(
-            "Flow is already processing a dictation.".into(),
-        ));
-    }
-    ERROR_GENERATION.fetch_add(1, Ordering::AcqRel);
-    cancel_error_dismiss();
-    let overlay_target = platform::capture_target();
-    if let Err(error) = platform::prepare_overlay(app, overlay_target) {
-        state.processing.store(false, Ordering::Release);
-        state.busy.store(false, Ordering::Release);
-        return Err(error);
-    }
-    run_pending(app, id, None).await
 }
 
 async fn run_pending(
     app: &AppHandle,
+    session_id: u64,
     pending_id: i64,
-    paste_target: Option<platform::TargetWindow>,
+    target: Option<TargetWindow>,
+    initial_delivery_mode: &str,
 ) -> Result<()> {
     let state = app.state::<AppState>();
-    emit_overlay(app, "analysing", Some("Analyzing"));
-    let result = async {
-        let pending = state.database.pending_dictation(pending_id)?;
-        let settings = state.database.settings(true)?;
-        let transcript = if let Some(transcript) = pending.raw_text.clone() {
-            transcript
+    let cancel_token = {
+        let wf = state.workflow.state.lock().unwrap();
+        wf.cancellation_token.clone()
+    };
+
+    let check_cancelled = || -> Result<()> {
+        if let Some(token) = &cancel_token {
+            if token.load(Ordering::Acquire) {
+                return Err(FlowError::Message("Processing was cancelled.".into()));
+            }
+        }
+        Ok(())
+    };
+
+    check_cancelled()?;
+
+    let pending = state.database.pending_dictation(pending_id)?;
+    let settings = state.database.settings(true)?;
+
+    // 1. Transcription stage
+    let (transcript, is_suspect) = if let Some(t) = pending.raw_text {
+        (t, false)
+    } else {
+        let api_key = credentials::read_api_key()?;
+        let wav = pending
+            .wav
+            .ok_or_else(|| FlowError::Message("The recoverable recording is incomplete.".into()))?;
+
+        let dict_entries = state.database.dictionary()?;
+        let trans_res = state.groq.transcribe(&api_key, wav, &dict_entries).await?;
+
+        check_cancelled()?;
+
+        let review_reason = if trans_res.is_suspect {
+            Some("suspect_speech")
         } else {
-            let api_key = credentials::read_api_key()?;
-            let dictionary = state.database.dictionary()?;
-            let (preferred_spellings, _) = dictionary_guidance(&dictionary);
-            let wav = pending.wav.ok_or_else(|| {
-                FlowError::Message("The recoverable recording is incomplete.".into())
-            })?;
-            let transcript = state
-                .groq
-                .transcribe(&api_key, wav, &preferred_spellings)
-                .await?;
-            state
-                .database
-                .save_pending_transcript(pending_id, &transcript)?;
-            transcript
+            None
         };
 
-        let final_text = if let Some(final_text) = pending.final_text {
-            final_text
-        } else {
-            let api_key = credentials::read_api_key()?;
-            let dictionary = state.database.dictionary()?;
-            let (_, corrections) = dictionary_guidance(&dictionary);
-            let normalized = normalize_with_corrections(&transcript, &corrections);
-            let snippet = state
-                .database
-                .snippets()?
-                .into_iter()
-                .find(|snippet| normalize_utterance(&snippet.trigger) == normalized);
-            let final_text = if let Some(snippet) = snippet {
-                snippet.content
+        // Apply initial deterministic corrections to prepare corrected_text
+        let (_, valid_rules) = get_dictionary_rules(&dict_entries);
+        let corrected = text::apply_corrections(&trans_res.text, &valid_rules);
+
+        state.database.save_pending_transcript(
+            pending_id,
+            &trans_res.text,
+            &corrected,
+            review_reason,
+        )?;
+
+        (trans_res.text, trans_res.is_suspect)
+    };
+
+    if is_suspect {
+        // Suspect speech requires user acceptance. Stop here before cleanup/delivery.
+        {
+            let mut wf = state.workflow.state.lock().unwrap();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
+        }
+        state.workflow.emit_state(app);
+        hide_overlay(app);
+        let _ = app.emit(
+            "flow-warning",
+            MessagePayload {
+                message: "Dictation contains uncertain speech and was saved for your review."
+                    .into(),
+            },
+        );
+        return Ok(());
+    }
+
+    check_cancelled()?;
+
+    // 2. Cleanup & Snippet stage
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Cleaning;
+            wf.revision = state.workflow.next_revision();
+        }
+    }
+    state.workflow.emit_state(app);
+    emit_overlay(app, "thinking", Some("Thinking"));
+
+    let dict_entries = state.database.dictionary()?;
+    let (_, valid_rules) = get_dictionary_rules(&dict_entries);
+    let corrected = text::apply_corrections(&transcript, &valid_rules);
+
+    let final_text = if let Some(f) = pending.final_text {
+        f
+    } else {
+        // Check snippet trigger
+        let snippets = state.database.snippets()?;
+        let matched_snippet = snippets.iter().find(|s| {
+            if !s.enabled {
+                return false;
+            }
+            if let (Some(s_norm), Some(u_norm)) = (
+                text::normalize_snippet_trigger(&s.trigger),
+                text::normalize_snippet_trigger(&corrected),
+            ) {
+                s_norm == u_norm
             } else {
-                emit_overlay(app, "thinking", Some("Thinking"));
-                state
-                    .groq
-                    .clean(&api_key, &transcript, &corrections)
-                    .await?
-            };
-            state.database.save_pending_final(pending_id, &final_text)?;
-            final_text
+                false
+            }
+        });
+
+        let text_result = if let Some(snippet) = matched_snippet {
+            snippet.content.clone()
+        } else {
+            let api_key = credentials::read_api_key()?;
+            state.groq.clean(&api_key, &transcript, &corrected).await?
         };
 
+        check_cancelled()?;
+
+        let no_content = text_result.is_empty();
         state
             .database
-            .save_pending_to_history(pending.id, &settings.history_retention)?;
-        let completion_message = if let Some(paste_target) = paste_target {
-            platform::paste_text(paste_target, &final_text)?;
-            "Dictation pasted"
-        } else {
-            platform::copy_text(&final_text)?;
-            "Recovered dictation copied"
-        };
-        state.database.delete_pending(pending.id)?;
-        let _ = app.emit_to("overlay", "overlay-progress-complete", ());
-        Ok::<_, FlowError>(completion_message)
-    }
-    .await;
+            .save_pending_final(pending_id, &text_result, no_content)?;
+        text_result
+    };
 
-    match result {
-        Ok(completion_message) => {
-            dismiss_overlay(app, None).await;
-            let _ = app.emit(
-                "dictation-complete",
-                MessagePayload {
-                    message: completion_message.into(),
-                },
-            );
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
-            Ok(())
+    if final_text.is_empty() {
+        // Pure hesitation filler words
+        {
+            let mut wf = state.workflow.state.lock().unwrap();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
         }
-        Err(error) => {
-            let message = friendly_error_ref(&error);
-            let _ = state.database.save_pending_error(pending_id, &message);
-            state.processing.store(false, Ordering::Release);
-            state.busy.store(false, Ordering::Release);
-            Err(error)
+        state.workflow.emit_state(app);
+        hide_overlay(app);
+        return Ok(());
+    }
+
+    check_cancelled()?;
+
+    // 3. Delivery stage
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Delivering;
+            wf.revision = state.workflow.next_revision();
         }
     }
+    state.workflow.emit_state(app);
+
+    state
+        .database
+        .save_pending_to_history(pending_id, &settings.history_retention)?;
+
+    let delivery_outcome = if initial_delivery_mode == "automatic" {
+        if let Some(t) = target {
+            if platform::is_flow_window(t.hwnd) {
+                state
+                    .database
+                    .update_pending_delivery(pending_id, "not_attempted", None)?;
+                "Dictation ready for review"
+            } else {
+                let outcome = platform::paste_text(t, &final_text);
+                match outcome {
+                    Ok("pasted") => {
+                        state
+                            .database
+                            .update_pending_delivery(pending_id, "shortcut_sent", None)?;
+                        let _ = state.database.delete_pending(pending_id);
+                        "Dictation sent to the selected application"
+                    }
+                    Err(err) => {
+                        let msg = format!("Paste delivery failed: {err}");
+                        crate::diagnostics::log_event("error", Some(session_id), None, &msg);
+                        let warning = format!("Delivery failed: {err}. Dictation saved for review.");
+                        state.database.update_pending_delivery(
+                            pending_id,
+                            "not_attempted",
+                            Some(&warning),
+                        )?;
+                        "Destination was unavailable. Dictation saved for review."
+                    }
+                    _ => {
+                        state.database.update_pending_delivery(
+                            pending_id,
+                            "not_attempted",
+                            Some("Destination was unavailable. Dictation saved for review."),
+                        )?;
+                        "Destination was unavailable. Dictation saved for review."
+                    }
+                }
+            }
+        } else {
+            state
+                .database
+                .update_pending_delivery(pending_id, "not_attempted", None)?;
+            "Dictation ready for review"
+        }
+    } else {
+        state
+            .database
+            .update_pending_delivery(pending_id, "not_attempted", None)?;
+        "Dictation ready for review"
+    };
+
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Idle;
+            wf.active_pending_id = None;
+            wf.session_id = None;
+            wf.cancellation_token = None;
+            wf.revision = state.workflow.next_revision();
+        }
+    }
+    state.workflow.emit_state(app);
+    hide_overlay(app);
+
+    let _ = app.emit(
+        "dictation-complete",
+        MessagePayload {
+            message: delivery_outcome.into(),
+        },
+    );
+
+    Ok(())
 }
 
-pub fn cancel(app: &AppHandle) -> Result<()> {
+pub async fn retry_pending(app: &AppHandle, id: i64) -> Result<()> {
     let state = app.state::<AppState>();
-    state
-        .recorder
-        .cancel()
-        .map_err(|error| reported_error(app, error))?;
-    platform::set_recording(false);
-    state.busy.store(false, Ordering::Release);
-    let _ = app.emit_to("overlay", "overlay-dismiss", ());
-    let generation = ERROR_GENERATION.load(Ordering::Acquire);
+    let session_id = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.phase != WorkflowPhase::Idle {
+            return Err(FlowError::Busy);
+        }
+        if wf.active_pending_id == Some(id) {
+            return Err(FlowError::Busy);
+        }
+        let session_id = state.workflow.next_session();
+        wf.phase = WorkflowPhase::Transcribing;
+        wf.session_id = Some(session_id);
+        wf.active_pending_id = Some(id);
+        wf.cancellation_token = Some(Arc::new(AtomicBool::new(false)));
+        wf.revision = state.workflow.next_revision();
+        session_id
+    };
+
+    state.workflow.emit_state(app);
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(130)).await;
-        if ERROR_GENERATION.load(Ordering::Acquire) == generation {
-            hide_overlay(&app_clone);
+        if let Err(e) = run_pending(&app_clone, session_id, id, None, "copy_only").await {
+            report_error(&app_clone, e, Some(session_id));
         }
     });
     Ok(())
 }
 
-pub fn report_error(app: &AppHandle, error: FlowError) {
-    let _ = reported_error(app, error);
-}
-
-fn reported_error(app: &AppHandle, error: FlowError) -> FlowError {
-    platform::set_recording(false);
+pub async fn retry_pending_transcription(app: &AppHandle, id: i64) -> Result<()> {
     let state = app.state::<AppState>();
-    if !state.processing.load(Ordering::Acquire) {
-        state.busy.store(false, Ordering::Release);
+    let pending = state.database.pending_dictation(id)?;
+
+    let wav = pending.wav.ok_or_else(|| {
+        FlowError::Message("No audio recording is available for retranscription.".into())
+    })?;
+    if wav.is_empty() {
+        return Err(FlowError::Message(
+            "No audio recording is available for retranscription.".into(),
+        ));
     }
-    let message = friendly_error(error);
-    eprintln!("Flow error: {message}");
-    let _ = platform::prepare_overlay(app, platform::capture_target());
-    emit_overlay(app, "error", Some(&message));
-    let _ = app.emit(
-        "flow-error",
-        MessagePayload {
-            message: message.clone(),
-        },
-    );
-    let generation = ERROR_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    if pending.history_saved {
+        return Err(FlowError::Message(
+            "This dictation has already been saved to history.".into(),
+        ));
+    }
+
+    let session_id = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.phase != WorkflowPhase::Idle {
+            return Err(FlowError::Busy);
+        }
+        if wf.active_pending_id == Some(id) {
+            return Err(FlowError::Busy);
+        }
+        let session_id = state.workflow.next_session();
+        wf.phase = WorkflowPhase::Transcribing;
+        wf.session_id = Some(session_id);
+        wf.active_pending_id = Some(id);
+        wf.cancellation_token = Some(Arc::new(AtomicBool::new(false)));
+        wf.revision = state.workflow.next_revision();
+        session_id
+    };
+
+    state.workflow.emit_state(app);
+    emit_overlay(app, "analysing", Some("Transcribing"));
+
     let app_clone = app.clone();
-    let task = tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-        if ERROR_GENERATION.load(Ordering::Acquire) == generation {
-            dismiss_overlay(&app_clone, Some(generation)).await;
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = run_retranscribe(&app_clone, session_id, id, wav).await {
+            report_error(&app_clone, e, Some(session_id));
         }
     });
-    if let Ok(mut previous) = ERROR_DISMISS_TASK.lock() {
-        if let Some(previous) = previous.replace(task) {
-            previous.abort();
-        }
-    }
-    crate::show_main(app);
-    FlowError::Message(message)
+
+    Ok(())
 }
 
-fn cancel_error_dismiss() {
-    if let Ok(mut task) = ERROR_DISMISS_TASK.lock() {
-        if let Some(task) = task.take() {
-            task.abort();
+async fn run_retranscribe(
+    app: &AppHandle,
+    session_id: u64,
+    pending_id: i64,
+    wav: Vec<u8>,
+) -> Result<()> {
+    let state = app.state::<AppState>();
+    let cancel_token = {
+        let wf = state.workflow.state.lock().unwrap();
+        wf.cancellation_token.clone()
+    };
+
+    let check_cancelled = || -> Result<()> {
+        if let Some(token) = &cancel_token {
+            if token.load(Ordering::Acquire) {
+                return Err(FlowError::Message("Processing was cancelled.".into()));
+            }
+        }
+        Ok(())
+    };
+
+    check_cancelled()?;
+
+    let api_key = credentials::read_api_key()?;
+    let dict_entries = state.database.dictionary()?;
+    let trans_res = state.groq.transcribe(&api_key, wav, &dict_entries).await?;
+
+    check_cancelled()?;
+
+    let review_reason = if trans_res.is_suspect {
+        Some("suspect_speech")
+    } else {
+        None
+    };
+
+    let (_spellings, valid_rules) = get_dictionary_rules(&dict_entries);
+    let corrected = text::apply_corrections(&trans_res.text, &valid_rules);
+
+    state.database.save_pending_transcript(
+        pending_id,
+        &trans_res.text,
+        &corrected,
+        review_reason,
+    )?;
+
+    if trans_res.is_suspect {
+        {
+            let mut wf = state.workflow.state.lock().unwrap();
+            if wf.session_id == Some(session_id) {
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
+        }
+        state.workflow.emit_state(app);
+        hide_overlay(app);
+        let _ = app.emit(
+            "flow-warning",
+            MessagePayload {
+                message: "Dictation contains uncertain speech and was saved for your review."
+                    .into(),
+            },
+        );
+        return Ok(());
+    }
+
+    check_cancelled()?;
+
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Cleaning;
+            wf.revision = state.workflow.next_revision();
         }
     }
+    state.workflow.emit_state(app);
+    emit_overlay(app, "thinking", Some("Thinking"));
+
+    let cleaned = state
+        .groq
+        .clean(&api_key, &trans_res.text, &corrected)
+        .await?;
+    check_cancelled()?;
+
+    state
+        .database
+        .save_pending_final(pending_id, &cleaned, cleaned.trim().is_empty())?;
+
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Idle;
+            wf.active_pending_id = None;
+            wf.session_id = None;
+            wf.cancellation_token = None;
+            wf.revision = state.workflow.next_revision();
+        }
+    }
+    state.workflow.emit_state(app);
+    hide_overlay(app);
+
+    let _ = app.emit(
+        "dictation-complete",
+        MessagePayload {
+            message: "Retranscription complete. Ready for review.".into(),
+        },
+    );
+
+    Ok(())
+}
+
+pub fn start_mic_test(app: &AppHandle, device_id: &str) -> Result<()> {
+    let state = app.state::<AppState>();
+    let session_id = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        match wf.phase {
+            WorkflowPhase::Idle => {}
+            WorkflowPhase::Faulted => {
+                return Err(FlowError::Message(
+                    "The microphone is not responding. Restart Flow to reconnect it.".into(),
+                ));
+            }
+            _ => return Err(FlowError::Busy),
+        }
+        let sid = state.workflow.next_session();
+        wf.phase = WorkflowPhase::MicrophoneTest;
+        wf.session_id = Some(sid);
+        wf.revision = state.workflow.next_revision();
+        sid
+    };
+    state.workflow.emit_state(app);
+
+    let res = state
+        .recorder
+        .start_mic_test(session_id, app.clone(), device_id);
+    if let Err(e) = res {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.session_id == Some(session_id) && wf.phase == WorkflowPhase::MicrophoneTest {
+            wf.phase = WorkflowPhase::Idle;
+            wf.session_id = None;
+            wf.revision = state.workflow.next_revision();
+        }
+        state.workflow.emit_state(app);
+        return Err(e);
+    }
+
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let st = app_clone.state::<AppState>();
+        let is_same = {
+            let wf = st.workflow.state.lock().unwrap();
+            wf.phase == WorkflowPhase::MicrophoneTest && wf.session_id == Some(session_id)
+        };
+        if is_same {
+            let _ = stop_mic_test(&app_clone);
+        }
+    });
+
+    Ok(())
+}
+
+pub fn stop_mic_test(app: &AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    let session_id = {
+        let wf = state.workflow.state.lock().unwrap();
+        if wf.phase != WorkflowPhase::MicrophoneTest {
+            return Ok(());
+        }
+        wf.session_id.ok_or(FlowError::NotRecording)?
+    };
+
+    let res = state.recorder.stop_mic_test(session_id);
+    {
+        let mut wf = state.workflow.state.lock().unwrap();
+        if wf.phase == WorkflowPhase::MicrophoneTest && wf.session_id == Some(session_id) {
+            wf.phase = WorkflowPhase::Idle;
+            wf.session_id = None;
+            wf.revision = state.workflow.next_revision();
+        }
+    }
+    state.workflow.emit_state(app);
+    res
+}
+
+/// Marks a no-longer-reachable capture spool as cancelled and removes its
+/// files. Used when the queued recorder Start consumed the RecoverySpool and
+/// the session then failed or was cancelled: the workflow state no longer owns
+/// the spool, so cleanup happens by capture UUID (marker first, data files
+/// next, marker removed only after the files are handled).
+fn discard_abandoned_spool(app: &AppHandle, capture_uuid: &str) {
+    let Ok(app_data) = app.path().app_data_dir() else {
+        return;
+    };
+    let recovery_dir = app_data.join("recovery");
+    let marker_path = recovery_dir.join(format!("{capture_uuid}.terminal.json"));
+    let pcm_path = recovery_dir.join(format!("{capture_uuid}.pcm.part"));
+    let meta_path = recovery_dir.join(format!("{capture_uuid}.json"));
+
+    let marker = recovery::TerminalMarker {
+        schema_version: 1,
+        capture_uuid: capture_uuid.to_string(),
+        created_at: recovery::now_secs(),
+        disposition: Disposition::Cancelled,
+    };
+    if let Ok(marker_json) = serde_json::to_string_pretty(&marker) {
+        let _ = recovery::write_sync_rename(&marker_path, marker_json.as_bytes());
+    }
+    let pcm_gone = std::fs::remove_file(&pcm_path).is_ok() || !pcm_path.exists();
+    let meta_gone = std::fs::remove_file(&meta_path).is_ok() || !meta_path.exists();
+    if pcm_gone && meta_gone {
+        let _ = std::fs::remove_file(&marker_path);
+    }
+}
+
+pub fn cancel(app: &AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    let (phase, session_id, spool, capture_uuid, _cancel_token) = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        let phase = wf.phase;
+        let session_id = wf.session_id;
+        let spool = wf.spool.take();
+        let cancel_token = wf.cancellation_token.clone();
+        let mut capture_uuid = None;
+
+        match phase {
+            WorkflowPhase::Starting | WorkflowPhase::Recording => {
+                capture_uuid = wf.capture_uuid.take();
+                wf.phase = WorkflowPhase::Idle;
+                wf.session_id = None;
+                wf.active_pending_id = None;
+                wf.cancellation_token = None;
+                wf.revision = state.workflow.next_revision();
+            }
+            WorkflowPhase::Transcribing | WorkflowPhase::Cleaning | WorkflowPhase::Delivering => {
+                if let Some(token) = &cancel_token {
+                    token.store(true, Ordering::Release);
+                }
+                wf.phase = WorkflowPhase::Idle;
+                wf.active_pending_id = None;
+                wf.session_id = None;
+                wf.revision = state.workflow.next_revision();
+            }
+            _ => return Ok(()),
+        }
+
+        (phase, session_id, spool, capture_uuid, cancel_token)
+    };
+
+    platform::set_recording(false);
+    state.workflow.emit_state(app);
+    hide_overlay(app);
+
+    if matches!(phase, WorkflowPhase::Starting | WorkflowPhase::Recording) {
+        if let Some(sid) = session_id {
+            let _ = state.recorder.cancel(sid);
+        }
+        if let Some(mut s) = spool {
+            let _ = s.mark_terminal(Disposition::Cancelled);
+            let _ = s.cleanup();
+        } else if let Some(uuid) = capture_uuid {
+            // The queued Start consumed the spool, so it is owned by the audio
+            // worker; tear it down by capture UUID after recorder.cancel has
+            // confirmed the worker can no longer write the files.
+            discard_abandoned_spool(app, &uuid);
+        }
+    }
+
+    Ok(())
+}
+
+pub fn discard_pending(app: &AppHandle, id: i64) -> Result<()> {
+    let state = app.state::<AppState>();
+    let pending = state.database.pending_dictation(id)?;
+
+    if let Some(uuid) = &pending.capture_uuid {
+        if let Ok(app_data) = app.path().app_data_dir() {
+            let recovery_dir = app_data.join("recovery");
+            let marker_path = recovery_dir.join(format!("{uuid}.terminal.json"));
+            let pcm_path = recovery_dir.join(format!("{uuid}.pcm.part"));
+            let meta_path = recovery_dir.join(format!("{uuid}.json"));
+
+            // Before deleting the pending row, durably mark the spool as
+            // discarded so a crash cannot resurrect the audio as a new capture.
+            // If the marker cannot be persisted, keep the pending row.
+            let marker = recovery::TerminalMarker {
+                schema_version: 1,
+                capture_uuid: uuid.clone(),
+                created_at: recovery::now_secs(),
+                disposition: Disposition::Discarded,
+            };
+            let marker_json = serde_json::to_string_pretty(&marker).map_err(|e| {
+                FlowError::Message(format!("Could not serialize the discard marker: {e}"))
+            })?;
+            recovery::write_sync_rename(&marker_path, marker_json.as_bytes())?;
+
+            // Reserve and delete the pending item while holding the workflow
+            // claim so retry_pending or run_pending cannot access the same ID
+            // concurrently.
+            {
+                let wf = state.workflow.state.lock().unwrap();
+                if wf.active_pending_id == Some(id) {
+                    return Err(FlowError::Message(
+                        "Cannot discard an active dictation.".into(),
+                    ));
+                }
+                state.database.delete_pending(id)?;
+            }
+
+            // Remove the data files, then the terminal marker only after the
+            // related spool files are handled; otherwise the marker stays and
+            // startup maintenance retries the cleanup instead of importing.
+            let pcm_gone = std::fs::remove_file(&pcm_path).is_ok() || !pcm_path.exists();
+            let meta_gone = std::fs::remove_file(&meta_path).is_ok() || !meta_path.exists();
+            if pcm_gone && meta_gone {
+                let _ = std::fs::remove_file(&marker_path);
+            }
+            return Ok(());
+        }
+    }
+
+    let wf = state.workflow.state.lock().unwrap();
+    if wf.active_pending_id == Some(id) {
+        return Err(FlowError::Message(
+            "Cannot discard an active dictation.".into(),
+        ));
+    }
+    state.database.delete_pending(id)?;
+    Ok(())
+}
+
+pub fn accept_pending_transcript(app: &AppHandle, id: i64) -> Result<()> {
+    let state = app.state::<AppState>();
+    state.database.accept_pending_transcript(id)?;
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Surface retry failures (including Busy) to the user instead of
+        // silently dropping the accepted transcript.
+        if let Err(e) = retry_pending(&app_clone, id).await {
+            report_error(&app_clone, e, None);
+        }
+    });
+    Ok(())
+}
+
+pub fn report_error(app: &AppHandle, error: FlowError, session_id: Option<u64>) {
+    let state = app.state::<AppState>();
+    let owns_session = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        let owns = match (session_id, wf.session_id) {
+            (Some(sid), Some(current)) => sid == current,
+            _ => false,
+        };
+        if owns {
+            wf.phase = WorkflowPhase::Idle;
+            wf.active_pending_id = None;
+            wf.session_id = None;
+            wf.revision = state.workflow.next_revision();
+        }
+        owns
+    };
+
+    let msg = error.to_string();
+    crate::diagnostics::log_event("error", session_id, None, &msg);
+    let _ = app.emit("flow-error", MessagePayload { message: msg });
+
+    if !owns_session {
+        // A stale task must not overwrite a newer recording session's state.
+        return;
+    }
+    platform::set_recording(false);
+    state.workflow.emit_state(app);
+    hide_overlay(app);
+}
+
+pub fn report_audio_fault(app: &AppHandle, error: FlowError) {
+    let state = app.state::<AppState>();
+    let session_id = {
+        let mut wf = state.workflow.state.lock().unwrap();
+        let sid = wf.session_id;
+        wf.phase = WorkflowPhase::Faulted;
+        wf.active_pending_id = None;
+        wf.session_id = None;
+        wf.revision = state.workflow.next_revision();
+        sid
+    };
+
+    platform::set_recording(false);
+    state.workflow.emit_state(app);
+    hide_overlay(app);
+
+    let msg = error.to_string();
+    crate::diagnostics::log_event("fault", session_id, None, &msg);
+    let _ = app.emit("flow-error", MessagePayload { message: msg });
 }
 
 fn emit_overlay(app: &AppHandle, phase: &str, message: Option<&str>) {
@@ -368,237 +1196,25 @@ fn hide_overlay(app: &AppHandle) {
     }
 }
 
-async fn dismiss_overlay(app: &AppHandle, expected_generation: Option<u64>) {
-    let _ = app.emit_to("overlay", "overlay-dismiss", ());
-    tokio::time::sleep(std::time::Duration::from_millis(130)).await;
-    if expected_generation
-        .map(|generation| ERROR_GENERATION.load(Ordering::Acquire) == generation)
-        .unwrap_or(true)
-    {
-        hide_overlay(app);
-    }
-}
-
-fn dictionary_guidance(entries: &[DictionaryEntry]) -> (Vec<String>, Vec<(String, String)>) {
-    let preferred_spellings = entries
+fn get_dictionary_rules(
+    entries: &[DictionaryEntry],
+) -> (Vec<String>, Vec<text::ValidatedCorrection>) {
+    let spellings = entries
         .iter()
-        .map(|entry| entry.correction.as_ref().unwrap_or(&entry.value).to_owned())
+        .filter(|e| e.enabled)
+        .map(|e| e.correction.as_deref().unwrap_or(&e.value).to_string())
         .collect();
-    let corrections = entries
+
+    let raw_corrections: Vec<(String, String)> = entries
         .iter()
-        .filter_map(|entry| {
-            entry.correction.as_ref().map(|correction| {
-                (
-                    normalize_correction_source(&entry.value),
-                    correction.clone(),
-                )
-            })
+        .filter(|e| e.enabled)
+        .filter_map(|e| {
+            e.correction
+                .as_ref()
+                .map(|corr| (e.value.clone(), corr.clone()))
         })
         .collect();
-    (preferred_spellings, corrections)
-}
 
-pub(crate) fn normalize_utterance(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches(|character: char| character.is_punctuation() || character.is_whitespace())
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-pub(crate) fn normalize_correction_source(value: &str) -> String {
-    value
-        .trim_start_matches(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    '"' | '\'' | '(' | '[' | '{' | '“' | '‘' | '¿' | '¡'
-                )
-        })
-        .trim_end_matches(|character: char| {
-            character.is_whitespace()
-                || matches!(
-                    character,
-                    '.' | ','
-                        | '!'
-                        | '?'
-                        | ';'
-                        | ':'
-                        | '"'
-                        | '\''
-                        | ')'
-                        | ']'
-                        | '}'
-                        | '…'
-                        | '”'
-                        | '’'
-                )
-        })
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn normalize_with_corrections(value: &str, corrections: &[(String, String)]) -> String {
-    let normalized = normalize_correction_source(value);
-    let Ok(mut cache) = CORRECTION_MATCHER.lock() else {
-        return normalize_utterance(&normalized);
-    };
-    let next = corrections
-        .iter()
-        .map(|(incorrect, correct)| {
-            (
-                normalize_correction_source(incorrect),
-                normalize_correction_replacement(correct),
-            )
-        })
-        .filter(|(incorrect, correct)| !incorrect.is_empty() && !correct.is_empty())
-        .collect::<Vec<_>>();
-    if cache.corrections != next {
-        cache.matcher = if next.is_empty() {
-            None
-        } else {
-            AhoCorasickBuilder::new()
-                .build(next.iter().map(|(incorrect, _)| incorrect))
-                .ok()
-        };
-        cache.corrections = next;
-    }
-    let Some(matcher) = cache.matcher.as_ref() else {
-        return normalize_utterance(&normalized);
-    };
-    let mut corrected = String::with_capacity(normalized.len());
-    let mut index = 0;
-    let mut matches = matcher
-        .find_overlapping_iter(&normalized)
-        .filter(|matching| {
-            normalized[..matching.start()]
-                .chars()
-                .next_back()
-                .is_none_or(|character| !character.is_alphanumeric())
-                && normalized[matching.end()..]
-                    .chars()
-                    .next()
-                    .is_none_or(|character| !character.is_alphanumeric())
-        })
-        .collect::<Vec<_>>();
-    matches.sort_unstable_by(|left, right| {
-        left.start()
-            .cmp(&right.start())
-            .then_with(|| right.len().cmp(&left.len()))
-    });
-    for matching in matches {
-        if matching.start() < index {
-            continue;
-        }
-        corrected.push_str(&normalized[index..matching.start()]);
-        corrected.push_str(&cache.corrections[matching.pattern()].1);
-        index = matching.end();
-    }
-    corrected.push_str(&normalized[index..]);
-    normalize_utterance(&corrected)
-}
-
-fn normalize_correction_replacement(value: &str) -> String {
-    value
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
-}
-
-fn friendly_error(error: FlowError) -> String {
-    friendly_error_ref(&error)
-}
-
-fn friendly_error_ref(error: &FlowError) -> String {
-    match error {
-        FlowError::Network(_) => {
-            "Flow couldn’t reach Groq. Check your connection and try again.".into()
-        }
-        FlowError::Windows(message) => message.clone(),
-        other => other.to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::models::DictionaryEntry;
-
-    use super::{dictionary_guidance, normalize_with_corrections};
-
-    #[test]
-    fn regular_dictionary_words_never_reach_cleanup_guidance() {
-        let entries = vec![
-            DictionaryEntry {
-                id: 1,
-                value: "Flow".into(),
-                correction: None,
-                created_at: 1,
-            },
-            DictionaryEntry {
-                id: 2,
-                value: " btw. ".into(),
-                correction: Some("by the way".into()),
-                created_at: 2,
-            },
-            DictionaryEntry {
-                id: 3,
-                value: ".NET".into(),
-                correction: Some("dotnet".into()),
-                created_at: 3,
-            },
-        ];
-
-        let (preferred_spellings, corrections) = dictionary_guidance(&entries);
-        assert_eq!(preferred_spellings, ["Flow", "by the way", "dotnet"]);
-        assert_eq!(
-            corrections,
-            [
-                ("btw".into(), "by the way".into()),
-                (".net".into(), "dotnet".into())
-            ]
-        );
-    }
-
-    #[test]
-    fn dictionary_corrections_apply_before_snippet_matching() {
-        let corrections = vec![
-            ("four word".into(), "Forward".into()),
-            ("see sharp".into(), "C#".into()),
-            ("C++".into(), "C Plus Plus".into()),
-        ];
-        assert_eq!(
-            normalize_with_corrections("Please, four word now.", &corrections),
-            "please, forward now"
-        );
-        assert_eq!(
-            normalize_with_corrections("four words", &corrections),
-            "four words"
-        );
-        assert_eq!(
-            normalize_with_corrections("see sharp project", &corrections),
-            "c# project"
-        );
-        assert_eq!(
-            normalize_with_corrections("C++ project", &corrections),
-            "c plus plus project"
-        );
-        assert_eq!(
-            normalize_with_corrections("c project", &corrections),
-            "c project"
-        );
-    }
-
-    #[test]
-    fn correction_matching_keeps_valid_shorter_overlaps() {
-        let corrections = vec![("c".into(), "see".into()), ("c sharp".into(), "C#".into())];
-        assert_eq!(
-            normalize_with_corrections("c sharper", &corrections),
-            "see sharper"
-        );
-    }
+    let (valid, _) = text::filter_conflicting_corrections(&raw_corrections);
+    (spellings, valid)
 }

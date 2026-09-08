@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as Progress from "@radix-ui/react-progress";
+import type { WorkflowStateSnapshot } from "./types";
 
 type Phase = "recording" | "analysing" | "thinking" | "error";
 
@@ -21,6 +22,8 @@ export default function Overlay() {
   const lastPublishedProgress = useRef(0);
   const processingStartedAt = useRef<number | null>(null);
   const processingComplete = useRef(false);
+  const currentSessionId = useRef<number | null>(null);
+  const lastRevision = useRef(0);
 
   useEffect(() => {
     let animationFrame = 0;
@@ -87,14 +90,43 @@ export default function Overlay() {
         scheduleAnimation();
       }
     });
+
+    const workflowListener = listen<WorkflowStateSnapshot>("workflow-state", (event) => {
+      const payload = event.payload;
+      // Drop stale snapshots before any session reset or phase processing:
+      // an out-of-order event from a previous revision must never modify the
+      // current session's closing state.
+      if (payload.revision < lastRevision.current) {
+        return;
+      }
+      lastRevision.current = payload.revision;
+      const { session_id, phase } = payload;
+      if (session_id !== null && session_id !== currentSessionId.current) {
+        currentSessionId.current = session_id;
+        setAppearanceKey((k) => k + 1);
+        processingStartedAt.current = null;
+        processingComplete.current = false;
+        targetLevel.current = 0;
+        displayedLevel.current = 0;
+        publishProgress(0);
+        // A new session must never inherit the previous session's closing state.
+        setIsClosing(false);
+      }
+      if (phase === "idle") {
+        setIsClosing(true);
+      }
+    });
+
     const dismissalListener = listen("overlay-dismiss", () => {
       setIsClosing(true);
     });
+
     const completionListener = listen("overlay-progress-complete", () => {
       processingComplete.current = true;
       publishProgress(100);
       scheduleAnimation();
     });
+
     const waveListener = listen<{ level: number }>("waveform", (event) => {
       const rawLevel = Math.max(0, Math.min(1, event.payload.level));
       targetLevel.current = rawLevel < 0.012
@@ -106,6 +138,7 @@ export default function Overlay() {
     return () => {
       window.cancelAnimationFrame(animationFrame);
       void stateListener.then((fn) => fn());
+      void workflowListener.then((fn) => fn());
       void dismissalListener.then((fn) => fn());
       void completionListener.then((fn) => fn());
       void waveListener.then((fn) => fn());

@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BookOpen } from "lucide-react";
 import { api } from "../api";
 import { EditableRow } from "../components/EditableRow";
@@ -124,93 +125,95 @@ export function Dictionary({ notify }: { notify: (data: ToastData) => void }) {
         )}
       </section>
 
-      {addOpen && (
-        <div
-          className="modal-backdrop"
-          role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
-        >
-          <section
-            ref={dialogRef}
-            className="creation-dialog creation-dialog--vocabulary"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="add-dictionary-title"
+      {addOpen &&
+        createPortal(
+          <div
+            className="modal-backdrop"
+            role="presentation"
+            onMouseDown={(event) => event.target === event.currentTarget && closeAddDialog()}
           >
-            <header>
-              <h2 id="add-dictionary-title">Add to vocabulary</h2>
-            </header>
+            <section
+              ref={dialogRef}
+              className="creation-dialog creation-dialog--vocabulary"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="add-dictionary-title"
+            >
+              <header>
+                <h2 id="add-dictionary-title">Add to vocabulary</h2>
+              </header>
 
-            <form onSubmit={(event) => void add(event)}>
-              <div className="creation-dialog__body">
-                <label className="dictionary-correction-toggle toggle-row">
-                  <div>
-                    <span>Correct a misspelling</span>
-                  </div>
-                  <input
-                    type="checkbox"
-                    role="switch"
-                    checked={correctingMisspelling}
-                    disabled={adding}
-                    onChange={(event) => setCorrectingMisspelling(event.target.checked)}
-                  />
-                </label>
-                {correctingMisspelling ? (
-                  <div className="dictionary-correction-fields">
+              <form onSubmit={(event) => void add(event)}>
+                <div className="creation-dialog__body">
+                  <label className="dictionary-correction-toggle toggle-row">
+                    <div>
+                      <span>Correct a misspelling</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      role="switch"
+                      checked={correctingMisspelling}
+                      disabled={adding}
+                      onChange={(event) => setCorrectingMisspelling(event.target.checked)}
+                    />
+                  </label>
+                  {correctingMisspelling ? (
+                    <div className="dictionary-correction-fields">
+                      <input
+                        id="dictionary-entry"
+                        aria-label="Misspelling"
+                        autoFocus
+                        placeholder="Misspelling"
+                        value={value}
+                        maxLength={120}
+                        disabled={adding}
+                        onChange={(event) => setValue(event.target.value)}
+                      />
+                      <span aria-hidden="true">→</span>
+                      <input
+                        aria-label="Correct spelling"
+                        placeholder="Correct spelling"
+                        value={correction}
+                        maxLength={120}
+                        disabled={adding}
+                        onChange={(event) => setCorrection(event.target.value)}
+                      />
+                    </div>
+                  ) : (
                     <input
                       id="dictionary-entry"
-                      aria-label="Misspelling"
+                      aria-label="New vocabulary word"
                       autoFocus
-                      placeholder="Misspelling"
+                      placeholder="Add a new word"
                       value={value}
                       maxLength={120}
                       disabled={adding}
                       onChange={(event) => setValue(event.target.value)}
                     />
-                    <span aria-hidden="true">→</span>
-                    <input
-                      aria-label="Correct spelling"
-                      placeholder="Correct spelling"
-                      value={correction}
-                      maxLength={120}
-                      disabled={adding}
-                      onChange={(event) => setCorrection(event.target.value)}
-                    />
-                  </div>
-                ) : (
-                  <input
-                    id="dictionary-entry"
-                    aria-label="New vocabulary word"
-                    autoFocus
-                    placeholder="Add a new word"
-                    value={value}
-                    maxLength={120}
+                  )}
+                </div>
+                <footer>
+                  <button
+                    className="secondary-button"
+                    type="button"
                     disabled={adding}
-                    onChange={(event) => setValue(event.target.value)}
-                  />
-                )}
-              </div>
-              <footer>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={adding}
-                  onClick={closeAddDialog}
-                >
-                  Cancel
-                </button>
-                <button
-                  className="primary-button"
-                  type="submit"
-                  disabled={!canAdd || adding}
-                >
-                  {adding ? "Adding…" : "Add word"}
-                </button>
-              </footer>
-            </form>
-          </section>
-        </div>
-      )}
+                    onClick={closeAddDialog}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={!canAdd || adding}
+                  >
+                    {adding ? "Adding…" : "Add word"}
+                  </button>
+                </footer>
+              </form>
+            </section>
+          </div>,
+          document.getElementById("modal-root") || document.body,
+        )}
     </section>
   );
 }
