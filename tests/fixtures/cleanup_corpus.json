@@ -59,10 +59,10 @@
     "corrections": { "c plus plus": "C++" },
     "constraints": {
       "mustChange": true,
-      "mustContain": ["C++ 20"],
+      "mustContain": ["C++20"],
       "mustNotContain": ["c plus plus"]
     },
-    "reference": "The client is written in C++ 20."
+    "reference": "The client is written in C++20."
   },
   {
     "id": 6,

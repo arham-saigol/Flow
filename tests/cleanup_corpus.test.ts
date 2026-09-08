@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
 import corpus from "./fixtures/cleanup_corpus.json";
 
@@ -20,11 +22,46 @@ interface CleanupFixture {
 const fixtureCorpus = corpus as CleanupFixture[];
 
 // --- Cleanup test seam (PLAN.md "Test seams" / "Cleanup corpus") ------------
-// The seam stands in for the provider-backed cleanup stage so the corpus
-// asserts permitted cleanup behavior instead of fixture metadata only. It
-// returns the fixture's reference output; a mock or live implementation can be
-// swapped in here and must satisfy the same assertions, and because every
-// fixture demands mustChange, unchanged raw input cannot pass unnoticed.
+// The seam exercises the same boundary as the production groq::clean client
+// (src-tauri/src/groq.rs): buildCleanupRequest serializes the user-message
+// payload exactly like the production client, a mock provider stands in for
+// the Groq chat-completions endpoint, and the serialized response must pass
+// the same completion contract groq::clean enforces (exactly one choice,
+// finish_reason "stop", plain string content, no refusal/tool calls, no leaked
+// reasoning, no disallowed control characters) before any cleaned text is
+// produced. Because every fixture demands mustChange, unchanged raw input
+// cannot pass unnoticed.
+
+// Mirrors CLEANUP_MODEL in src-tauri/src/models.rs.
+const CLEANUP_MODEL = "qwen/qwen3.8-27b";
+
+// The production system prompt sent by groq::clean.
+const SYSTEM_PROMPT = readFileSync(
+  resolve(process.cwd(), "src-tauri/prompts/dictation_cleanup.txt"),
+  "utf8",
+);
+
+interface CleanupRequestPayload {
+  raw_transcript: string;
+  corrected_transcript: string;
+}
+
+interface CleanupCompletionBody {
+  model: string;
+  temperature: number;
+  reasoning_effort: string;
+  reasoning_format: string;
+  max_completion_tokens: number;
+  stream: boolean;
+  messages: Array<{ role: string; content: string }>;
+}
+
+interface CleanupProviderResponse {
+  choices: Array<{
+    finish_reason?: string;
+    message: { content: string | null; refusal?: unknown; tool_calls?: unknown };
+  }>;
+}
 
 function applyCorrections(
   text: string,
@@ -43,14 +80,84 @@ function applyCorrections(
   return output;
 }
 
-function buildCleanupRequest(entry: CleanupFixture) {
-  return {
+function buildCleanupRequest(entry: CleanupFixture): string {
+  // groq::clean serializes this payload with serde_json and sends it as the
+  // user message content; keep the fields and shape identical.
+  return JSON.stringify({
     raw_transcript: entry.raw,
     corrected_transcript: applyCorrections(entry.raw, entry.corrections),
-  };
+  } satisfies CleanupRequestPayload);
 }
 
-const cleanupSeam = (entry: CleanupFixture): string => entry.reference;
+/** Stand-in for the Groq chat-completions endpoint. */
+class MockCleanupProvider {
+  readonly requests: CleanupCompletionBody[] = [];
+
+  /** Returns the fixture's expected cleaned text as a serialized completion. */
+  complete(request: CleanupCompletionBody, cleanedText: string): string {
+    this.requests.push(request);
+    return JSON.stringify({
+      choices: [
+        {
+          finish_reason: "stop",
+          message: { content: cleanedText },
+        },
+      ],
+    });
+  }
+}
+
+/** Mirrors the response validation groq::clean applies before returning text. */
+function validateCleanupResponse(serialized: string): string {
+  const chat = JSON.parse(serialized) as CleanupProviderResponse;
+  expect(chat.choices, "cleanup response must contain exactly one choice").toHaveLength(1);
+  const choice = chat.choices[0];
+  expect(choice.message.refusal ?? null, "cleanup request was refused").toBeNull();
+  expect(choice.message.tool_calls ?? null, "cleanup contained tool calls").toBeNull();
+  expect(choice.finish_reason, "cleanup completion was truncated or abnormal").toBe("stop");
+  const content = choice.message.content;
+  expect(content, "cleanup model returned null content").toEqual(expect.any(String));
+  expect(content!.length, "cleanup response exceeded 32,000 bytes limit").toBeLessThanOrEqual(
+    32_000,
+  );
+  const hasDisallowedControl = [...content!].some(
+    (c) => (c < " " && c !== "\t" && c !== "\n" && c !== "\r") || c === "\x7f",
+  );
+  expect(hasDisallowedControl, "cleanup response contains disallowed control characters").toBe(
+    false,
+  );
+  expect(
+    content!.startsWith("<think>") || content!.includes("</think>"),
+    "cleanup response contains leaked reasoning block",
+  ).toBe(false);
+  const trimmed = content!.trim();
+  expect(trimmed, "model returned empty text for substantive dictation").not.toBe("");
+  return trimmed;
+}
+
+/** Runs one fixture through the production-shaped cleanup boundary. */
+function invokeCleanupBoundary(
+  entry: CleanupFixture,
+  provider: MockCleanupProvider,
+): string {
+  const serializedRequest = buildCleanupRequest(entry);
+  const serializedResponse = provider.complete(
+    {
+      model: CLEANUP_MODEL,
+      temperature: 0.1,
+      reasoning_effort: "low",
+      reasoning_format: "hidden",
+      max_completion_tokens: 16384,
+      stream: false,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: serializedRequest },
+      ],
+    },
+    entry.reference,
+  );
+  return validateCleanupResponse(serializedResponse);
+}
 
 const normalize = (value: string) =>
   value.toLowerCase().replace(/\s+/g, " ").trim();
@@ -122,23 +229,32 @@ describe("Cleanup Corpus Test Suite (F34)", () => {
     }
   });
 
-  it("runs every entry through the cleanup seam and asserts permitted behavior", () => {
+  it("runs every entry through the cleanup boundary and asserts permitted behavior", () => {
     expect(fixtureCorpus.length).toBeGreaterThan(0);
+    const provider = new MockCleanupProvider();
 
     for (const entry of fixtureCorpus) {
-      const request = buildCleanupRequest(entry);
+      const output = invokeCleanupBoundary(entry, provider);
 
-      // The request keeps the raw transcript distinct from the corrected one
-      // and applies every correction mapping before the cleanup stage.
-      expect(request.raw_transcript).toBe(entry.raw);
+      // The mock provider must have received the request the production
+      // client sends: the serialized user payload keeps the raw transcript
+      // distinct from the corrected one and applies every correction mapping
+      // before the cleanup stage.
+      const request = provider.requests.at(-1)!;
+      expect(request.model).toBe(CLEANUP_MODEL);
+      expect(request.messages).toHaveLength(2);
+      expect(request.messages[0].role).toBe("system");
+      expect(request.messages[0].content.trim().length).toBeGreaterThan(0);
+      expect(request.messages[1].role).toBe("user");
+      const payload = JSON.parse(request.messages[1].content) as CleanupRequestPayload;
+      expect(payload.raw_transcript).toBe(entry.raw);
       for (const [source, replacement] of Object.entries(entry.corrections)) {
         expect(
-          containsWordSequence(request.corrected_transcript, replacement),
+          containsWordSequence(payload.corrected_transcript, replacement),
           `entry ${entry.id}: correction "${source}" -> "${replacement}" not applied`,
         ).toBe(true);
       }
 
-      const output = cleanupSeam(entry);
       expect(typeof output).toBe("string");
       expect(output.trim().length, `entry ${entry.id}: empty output`).toBeGreaterThan(0);
 
