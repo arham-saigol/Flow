@@ -202,11 +202,23 @@ impl AudioRecorder {
             })
             .map_err(|_| FlowError::Audio("The audio worker stopped unexpectedly.".into()))?;
 
-        response.recv_timeout(Duration::from_secs(5)).map_err(|_| {
-            FlowError::Audio(
-                "The microphone is not responding. Restart Flow to reconnect it.".into(),
-            )
-        })?
+        match response.recv_timeout(Duration::from_secs(5)) {
+            Ok(result) => result,
+            Err(_) => {
+                // The worker may still complete the queued mic-test start after
+                // this timeout. Enqueue a cancellation so the worker tears the
+                // session down instead of leaving an orphaned live capture that
+                // later starts cannot displace.
+                let (cancel_reply, _cancel_response) = mpsc::sync_channel(1);
+                let _ = self.sender.send(RecorderCommand::Cancel {
+                    session_id,
+                    reply: cancel_reply,
+                });
+                Err(FlowError::Audio(
+                    "The microphone is not responding. Restart Flow to reconnect it.".into(),
+                ))
+            }
+        }
     }
 
     pub fn stop_mic_test(&self, session_id: u64) -> Result<()> {
@@ -281,6 +293,20 @@ fn recorder_worker(
                 }
             }
             RecorderCommand::Cancel { session_id, reply } => {
+                // A timed-out mic-test start is invalidated here as well, so a
+                // late capture cannot keep the microphone live once this
+                // cancellation is processed.
+                if let Some(mut test) = active_test.take() {
+                    if test.session_id == session_id {
+                        test.stream.take();
+                        test.stop_capture.store(true, Ordering::Release);
+                        if let Some(thread) = test.capture_thread.take() {
+                            let _ = thread.join();
+                        }
+                    } else {
+                        active_test = Some(test);
+                    }
+                }
                 if let Some(mut rec) = active.take() {
                     if rec.session_id != session_id {
                         active = Some(rec);

@@ -178,11 +178,11 @@ impl Database {
             connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
 
         if updated_version == 1 {
-            // Backup before structural migration if this was an existing database
+            // Backup before structural migration if this was an existing
+            // database. A failed backup aborts the migration so the version-1
+            // database is left untouched for the next launch to retry.
             if is_existing_db {
-                if let Err(e) = Self::create_pre_upgrade_backup(&connection, path, 1) {
-                    eprintln!("Warning: pre-upgrade backup failed: {e}");
-                }
+                Self::create_pre_upgrade_backup(&connection, path, 1)?;
             }
 
             // Run migration 2 in a transaction

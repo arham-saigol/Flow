@@ -436,6 +436,18 @@ pub fn scan_and_import_spools(
                     }
                 }
 
+                // Unmarked spool: if the capture UUID is already recorded in
+                // pending or history, the audio is already durable in the
+                // database (the pending row stores the WAV, or the dictation
+                // was delivered to history). Importing here would resurrect a
+                // completed dictation as a new recoverable recording, so clean
+                // the stale spool files instead.
+                if database.has_capture_uuid(&capture_uuid).unwrap_or(false) {
+                    let _ = fs::remove_file(&pcm_part_path);
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+
                 // Unmarked spool: check if PCM file exists
                 if pcm_part_path.exists() {
                     let pcm = match fs::read(&pcm_part_path) {
@@ -509,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_probe_24_failed_insert_preserves_pcm() {
+    fn test_probe_24_known_uuid_spool_is_deduped_not_reimported() {
         let dir = temp_dir("p24");
         let db_path = dir.join("test.sqlite3");
         let database = Database::open(&db_path).unwrap();
@@ -523,7 +535,9 @@ mod tests {
         spool.write_pcm(&pcm_bytes).unwrap();
         drop(spool);
 
-        // Pre-insert the same UUID into pending_dictations so that the next INSERT will fail unique constraint!
+        // Pre-insert the same UUID into pending_dictations: the audio is
+        // already durable in the database row, so the scan must not import the
+        // spool again (a duplicate pending row or a resurrected recording).
         database
             .insert_pending_recording(uuid, b"fake", 100, false, None, "copy_only")
             .unwrap();
@@ -532,12 +546,62 @@ mod tests {
         let res = scan_and_import_spools(&recovery_dir, &database);
         assert!(res.is_ok());
 
-        // The PCM file must STILL exist because INSERT failed!
-        let pcm_path = recovery_dir.join(format!("{uuid}.pcm.part"));
+        // The existing pending row is untouched and no duplicate was created.
+        let pending = database.pending_dictations().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].capture_uuid.as_deref(), Some(uuid));
+        let record = database.pending_dictation(pending[0].id).unwrap();
+        assert_eq!(record.wav.as_deref(), Some(b"fake".as_slice()));
+
+        // The redundant spool files (metadata + PCM) were cleaned up.
         assert!(
-            pcm_path.exists(),
-            "PCM must not be deleted when DB insert fails"
+            !recovery_dir.join(format!("{uuid}.pcm.part")).exists(),
+            "spool PCM known to the database must be cleaned, not reimported"
         );
+        assert!(!recovery_dir.join(format!("{uuid}.json")).exists());
+
+        drop(database);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_unmarked_spool_with_known_uuid_is_cleaned_not_reimported() {
+        let dir = temp_dir("p26");
+        let db_path = dir.join("test.sqlite3");
+        let database = Database::open(&db_path).unwrap();
+
+        let recovery_dir = dir.join("recovery");
+        fs::create_dir_all(&recovery_dir).unwrap();
+
+        let uuid = "p26-uuid";
+        let mut spool = RecoverySpool::new(&recovery_dir, uuid).unwrap();
+        let pcm_bytes = vec![0u8; 4000];
+        spool.write_pcm(&pcm_bytes).unwrap();
+        drop(spool);
+
+        // Simulate a completed dictation: the pending row was delivered to
+        // history and then deleted, while its unmarked spool files remained.
+        let id = database
+            .insert_pending_recording(uuid, b"wav", 100, false, None, "copy_only")
+            .unwrap();
+        database
+            .save_pending_transcript(id, "hello", "hello", None)
+            .unwrap();
+        database.save_pending_final(id, "hello", false).unwrap();
+        database.save_pending_to_history(id, "30 days").unwrap();
+        database.delete_pending(id).unwrap();
+
+        let res = scan_and_import_spools(&recovery_dir, &database);
+        assert!(res.is_ok());
+
+        // The completed dictation must not reappear as a recoverable recording.
+        assert!(
+            database.pending_dictations().unwrap().is_empty(),
+            "completed dictations must not be reimported as pending"
+        );
+        // The stale spool files are cleaned up.
+        assert!(!recovery_dir.join(format!("{uuid}.pcm.part")).exists());
+        assert!(!recovery_dir.join(format!("{uuid}.json")).exists());
 
         drop(database);
         let _ = fs::remove_dir_all(dir);
