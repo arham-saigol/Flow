@@ -35,9 +35,11 @@ pub struct AppState {
     pub groq: GroqClient,
 }
 
-/// Per-command authorization decision: sensitive commands accept only the
-/// main-window label. The overlay label may not invoke any command here; it
-/// only receives `get_workflow_state` data and the `workflow-state` event.
+/// Per-command authorization decision: the overlay window may invoke only
+/// `get_workflow_state` (a read-only snapshot) and receives the
+/// `workflow-state` event. Every other command — including start/stop/cancel
+/// recording, cancel processing, and microphone listing — accepts only the
+/// main-window label.
 fn authorize_label(label: &str) -> Result<()> {
     if label != "main" {
         return Err(FlowError::Unauthorized);
@@ -335,7 +337,8 @@ fn set_autostart(
 }
 
 #[tauri::command]
-fn list_microphones() -> Result<Vec<Microphone>> {
+fn list_microphones(window: tauri::WebviewWindow) -> Result<Vec<Microphone>> {
+    require_main_window(&window)?;
     audio::list_microphones()
 }
 
@@ -356,12 +359,14 @@ fn copy_text(window: tauri::WebviewWindow, text: String) -> Result<()> {
 }
 
 #[tauri::command]
-fn start_recording(app: AppHandle) -> Result<()> {
+fn start_recording(window: tauri::WebviewWindow, app: AppHandle) -> Result<()> {
+    require_main_window(&window)?;
     workflow::start(&app)
 }
 
 #[tauri::command]
-async fn stop_recording(app: AppHandle) -> Result<()> {
+async fn stop_recording(window: tauri::WebviewWindow, app: AppHandle) -> Result<()> {
+    require_main_window(&window)?;
     workflow::stop_and_process(&app).await
 }
 
@@ -392,12 +397,14 @@ fn delete_pending_dictation(window: tauri::WebviewWindow, app: AppHandle, id: i6
 }
 
 #[tauri::command]
-fn cancel_recording(app: AppHandle) -> Result<()> {
+fn cancel_recording(window: tauri::WebviewWindow, app: AppHandle) -> Result<()> {
+    require_main_window(&window)?;
     workflow::cancel(&app)
 }
 
 #[tauri::command]
-fn cancel_processing(app: AppHandle) -> Result<()> {
+fn cancel_processing(window: tauri::WebviewWindow, app: AppHandle) -> Result<()> {
+    require_main_window(&window)?;
     workflow::cancel(&app)
 }
 

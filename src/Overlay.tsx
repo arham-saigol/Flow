@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import * as Progress from "@radix-ui/react-progress";
 import type { WorkflowStateSnapshot } from "./types";
-import { api } from "./api";
 
 type Phase = "recording" | "analysing" | "thinking" | "error";
 
@@ -24,6 +23,7 @@ export default function Overlay() {
   const processingStartedAt = useRef<number | null>(null);
   const processingComplete = useRef(false);
   const currentSessionId = useRef<number | null>(null);
+  const lastRevision = useRef(0);
 
   useEffect(() => {
     let animationFrame = 0;
@@ -92,7 +92,15 @@ export default function Overlay() {
     });
 
     const workflowListener = listen<WorkflowStateSnapshot>("workflow-state", (event) => {
-      const { session_id, phase } = event.payload;
+      const payload = event.payload;
+      // Drop stale snapshots before any session reset or phase processing:
+      // an out-of-order event from a previous revision must never modify the
+      // current session's closing state.
+      if (payload.revision < lastRevision.current) {
+        return;
+      }
+      lastRevision.current = payload.revision;
+      const { session_id, phase } = payload;
       if (session_id !== null && session_id !== currentSessionId.current) {
         currentSessionId.current = session_id;
         setAppearanceKey((k) => k + 1);
@@ -127,16 +135,8 @@ export default function Overlay() {
       scheduleAnimation();
     });
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        void api.cancelProcessing();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-
     return () => {
       window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener("keydown", handleKeyDown);
       void stateListener.then((fn) => fn());
       void workflowListener.then((fn) => fn());
       void dismissalListener.then((fn) => fn());
