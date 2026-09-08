@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use unicode_categories::UnicodeCategories;
 use unicode_normalization::UnicodeNormalization;
 
@@ -112,43 +112,61 @@ pub struct ValidatedCorrection {
     pub replacement: String,
 }
 
+/// Groups correction rules by normalized source and returns the normalized
+/// sources whose entries carry distinct replacements. Entries that share a
+/// normalized source and an identical replacement are the same rule, not a
+/// conflict. This classification is shared between the correction engine and
+/// the database's dictionary conflict recomputation.
+pub fn conflicting_correction_sources(rules: &[(String, String)]) -> HashSet<String> {
+    let mut groups: HashMap<String, HashSet<String>> = HashMap::new();
+    for (source, replacement) in rules {
+        let normalized = normalize_key(source);
+        if normalized.is_empty() {
+            continue;
+        }
+        groups
+            .entry(normalized)
+            .or_default()
+            .insert(replacement.clone());
+    }
+    groups
+        .into_iter()
+        .filter_map(|(normalized, replacements)| (replacements.len() > 1).then_some(normalized))
+        .collect()
+}
+
 /// Takes a list of (source, replacement) pairs, filters out duplicates/conflicts,
 /// and returns unambiguous mappings.
 pub fn filter_conflicting_corrections(
     rules: &[(String, String)],
 ) -> (Vec<ValidatedCorrection>, Vec<String>) {
-    // Map from normalized source -> (replacement, is_conflict)
-    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
-    for (src, rep) in rules {
-        let norm = normalize_key(src);
-        if norm.is_empty() {
+    let conflicting: HashSet<String> = conflicting_correction_sources(rules);
+
+    let mut valid: Vec<ValidatedCorrection> = Vec::new();
+    for (source, replacement) in rules {
+        let normalized = normalize_key(source);
+        if normalized.is_empty() || conflicting.contains(&normalized) {
             continue;
         }
-        groups.entry(norm).or_default().push(rep.clone());
-    }
-
-    let mut valid = Vec::new();
-    let mut conflicts = Vec::new();
-
-    for (norm, mut reps) in groups {
-        // Identical replacement values are not conflicts: deduplicate first so
-        // entries that differ only in source casing but share one replacement
-        // are retained and applied.
-        reps.sort();
-        reps.dedup();
-        if reps.len() > 1 {
-            // Multiple distinct rules with the same normalized source is a conflict
-            conflicts.push(norm);
-        } else if let Some(rep) = reps.into_iter().next() {
-            valid.push(ValidatedCorrection {
-                normalized_source: norm,
-                replacement: rep,
-            });
+        // Identical replacement values are not conflicts: keep one rule per
+        // normalized source so entries that differ only in source casing but
+        // share one replacement are retained and applied.
+        if valid
+            .iter()
+            .any(|entry| entry.normalized_source == normalized)
+        {
+            continue;
         }
+        valid.push(ValidatedCorrection {
+            normalized_source: normalized,
+            replacement: replacement.clone(),
+        });
     }
 
     // Sort by descending source length for longest-match-first priority
     valid.sort_by(|a, b| b.normalized_source.len().cmp(&a.normalized_source.len()));
+    let mut conflicts: Vec<String> = conflicting.into_iter().collect();
+    conflicts.sort();
     (valid, conflicts)
 }
 

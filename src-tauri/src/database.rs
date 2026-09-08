@@ -332,47 +332,68 @@ impl Database {
         let backup_file_name = format!("flow_backup_v{original_version}_{now}.sqlite3");
         let backup_path = backups_dir.join(&backup_file_name);
 
-        let mut dst = Connection::open(&backup_path)?;
-        let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        let busy_timeout = Duration::from_secs(10);
-        let mut busy_start: Option<std::time::Instant> = None;
-
-        loop {
-            match backup.step(100) {
-                Ok(rusqlite::backup::StepResult::Done) => break,
-                Ok(rusqlite::backup::StepResult::More) => {
-                    busy_start = None;
-                }
-                Ok(rusqlite::backup::StepResult::Busy)
-                | Ok(rusqlite::backup::StepResult::Locked) => {
-                    let bstart = busy_start.get_or_insert_with(std::time::Instant::now);
-                    if bstart.elapsed() > busy_timeout {
-                        return Err(FlowError::Message(
-                            "Database busy timeout exceeded during backup".into(),
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Ok(_) => {
-                    busy_start = None;
-                }
-                Err(e) => return Err(FlowError::from(e)),
+        let mut dst = match Connection::open(&backup_path) {
+            Ok(connection) => connection,
+            Err(error) => {
+                let _ = std::fs::remove_file(&backup_path);
+                return Err(FlowError::from(error));
             }
-        }
-
-        let metadata = BackupMetadata {
-            created_at: now,
-            expires_at: now + 7 * 86_400,
-            original_version,
-            backup_file: backup_file_name,
         };
 
-        let meta_json = serde_json::to_string_pretty(&metadata)
-            .map_err(|e| FlowError::Message(format!("Could not serialize backup metadata: {e}")))?;
-        std::fs::write(backups_dir.join("backup_metadata.json"), meta_json)
-            .map_err(|e| FlowError::Message(format!("Could not save backup metadata: {e}")))?;
+        // Every failure past this point leaves a partial or unusable backup
+        // file behind; remove it before returning the error so no corrupt
+        // backup is kept and the next launch can retry from a clean state.
+        let result: Result<()> = (|| {
+            let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
+            let busy_timeout = Duration::from_secs(10);
+            let mut busy_start: Option<std::time::Instant> = None;
 
-        Ok(())
+            loop {
+                match backup.step(100) {
+                    Ok(rusqlite::backup::StepResult::Done) => break,
+                    Ok(rusqlite::backup::StepResult::More) => {
+                        busy_start = None;
+                    }
+                    Ok(rusqlite::backup::StepResult::Busy)
+                    | Ok(rusqlite::backup::StepResult::Locked) => {
+                        let bstart = busy_start.get_or_insert_with(std::time::Instant::now);
+                        if bstart.elapsed() > busy_timeout {
+                            return Err(FlowError::Message(
+                                "Database busy timeout exceeded during backup".into(),
+                            ));
+                        }
+                        std::thread::sleep(Duration::from_millis(50));
+                    }
+                    Ok(_) => {
+                        busy_start = None;
+                    }
+                    Err(e) => return Err(FlowError::from(e)),
+                }
+            }
+
+            let metadata = BackupMetadata {
+                created_at: now,
+                expires_at: now + 7 * 86_400,
+                original_version,
+                backup_file: backup_file_name,
+            };
+
+            let meta_json = serde_json::to_string_pretty(&metadata).map_err(|e| {
+                FlowError::Message(format!("Could not serialize backup metadata: {e}"))
+            })?;
+            std::fs::write(backups_dir.join("backup_metadata.json"), meta_json)
+                .map_err(|e| FlowError::Message(format!("Could not save backup metadata: {e}")))?;
+
+            Ok(())
+        })();
+
+        // Close the destination connection before unlinking so the removal
+        // is not blocked by an open file handle on Windows.
+        drop(dst);
+        if result.is_err() {
+            let _ = std::fs::remove_file(&backup_path);
+        }
+        result
     }
 
     pub fn get_backup_info(&self) -> Option<(String, i64)> {
@@ -1127,10 +1148,12 @@ impl Database {
             )));
         }
 
-        if correction.is_some() && normalized_correction_source_exists(&tx, &value, None)? {
-            return Err(FlowError::Message(
-                "That dictionary entry already exists.".into(),
-            ));
+        if let Some(replacement) = &correction {
+            if normalized_correction_source_exists(&tx, &value, replacement, None)? {
+                return Err(FlowError::Message(
+                    "That dictionary entry already exists.".into(),
+                ));
+            }
         }
 
         tx.execute(
@@ -1157,10 +1180,12 @@ impl Database {
         let mut conn = self.conn()?;
         let tx = conn.transaction()?;
 
-        if correction.is_some() && normalized_correction_source_exists(&tx, &value, Some(id))? {
-            return Err(FlowError::Message(
-                "That dictionary entry already exists.".into(),
-            ));
+        if let Some(replacement) = &correction {
+            if normalized_correction_source_exists(&tx, &value, replacement, Some(id))? {
+                return Err(FlowError::Message(
+                    "That dictionary entry already exists.".into(),
+                ));
+            }
         }
 
         let rows = tx.execute(
@@ -1192,35 +1217,38 @@ impl Database {
 
     fn recompute_dictionary_conflicts(conn: &Connection) -> Result<()> {
         let mut stmt = conn.prepare(
-            "SELECT id, value FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''",
+            "SELECT id, value, correction FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''",
         )?;
-        let entries: Vec<(i64, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        let entries: Vec<(i64, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .filter_map(std::result::Result::ok)
             .collect();
         drop(stmt);
 
-        let mut groups: HashMap<String, Vec<i64>> = HashMap::new();
-        for (id, val) in entries {
-            let norm = text::normalize_key(&val);
-            if !norm.is_empty() {
-                groups.entry(norm).or_default().push(id);
-            }
-        }
+        // Conflict classification is shared with the correction engine: only
+        // distinct replacements for the same normalized source conflict;
+        // identical replacements are the same rule and stay enabled.
+        let rules: Vec<(String, String)> = entries
+            .iter()
+            .map(|(_, value, correction)| (value.clone(), correction.clone()))
+            .collect();
+        let conflicts = text::conflicting_correction_sources(&rules);
 
-        for (_, ids) in groups {
-            if ids.len() == 1 {
+        for (id, value, _) in entries {
+            let normalized = text::normalize_key(&value);
+            if normalized.is_empty() {
+                continue;
+            }
+            if conflicts.contains(&normalized) {
                 conn.execute(
-                    "UPDATE dictionary SET enabled = 1, conflict_reason = NULL WHERE id = ?1",
-                    [ids[0]],
+                    "UPDATE dictionary SET enabled = 0, conflict_reason = 'normalized_source_conflict' WHERE id = ?1",
+                    [id],
                 )?;
             } else {
-                for id in ids {
-                    conn.execute(
-                        "UPDATE dictionary SET enabled = 0, conflict_reason = 'normalized_source_conflict' WHERE id = ?1",
-                        [id],
-                    )?;
-                }
+                conn.execute(
+                    "UPDATE dictionary SET enabled = 1, conflict_reason = NULL WHERE id = ?1",
+                    [id],
+                )?;
             }
         }
         Ok(())
@@ -1477,20 +1505,31 @@ fn normalized_trigger_exists(
 fn normalized_correction_source_exists(
     conn: &Connection,
     value: &str,
+    replacement: &str,
     excluded_id: Option<i64>,
 ) -> Result<bool> {
     let normalized = text::normalize_correction_source(value);
     let mut statement = conn.prepare(
-        "SELECT id, value FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''",
+        "SELECT id, value, correction FROM dictionary WHERE correction IS NOT NULL AND trim(correction) != ''",
     )?;
     let entries = statement
         .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(entries.into_iter().any(|(id, existing)| {
-        Some(id) != excluded_id && text::normalize_correction_source(&existing) == normalized
-    }))
+    // A source is only taken when another entry shares its normalized source
+    // with a different replacement; an identical replacement is the same rule.
+    Ok(entries.into_iter().any(
+        |(id, existing, existing_replacement)| {
+            Some(id) != excluded_id
+                && text::normalize_correction_source(&existing) == normalized
+                && existing_replacement != replacement
+        },
+    ))
 }
 
 fn map_unique_violation(error: rusqlite::Error, message: &str) -> FlowError {
@@ -1658,6 +1697,24 @@ mod tests {
             update_error.to_string(),
             "That dictionary entry already exists."
         );
+
+        // A source whose replacement is identical to the existing entry is the
+        // same rule: it is allowed, and recomputation keeps both entries
+        // enabled instead of flagging a conflict.
+        let same_rule = database
+            .add_dictionary("four   word", Some("Forward"))
+            .expect("identical replacements for one source are allowed");
+        database
+            .update_dictionary(same_rule.id, "four   word", Some("Forward"))
+            .expect("recompute keeps identical-replacement entries enabled");
+        let entries = database.dictionary().unwrap();
+        let forward_rules: Vec<_> = entries
+            .iter()
+            .filter(|e| e.correction.as_deref() == Some("Forward"))
+            .collect();
+        assert_eq!(forward_rules.len(), 2);
+        assert!(forward_rules.iter().all(|e| e.enabled));
+        assert!(forward_rules.iter().all(|e| e.conflict_reason.is_none()));
 
         drop(database);
         let _ = std::fs::remove_file(path);
