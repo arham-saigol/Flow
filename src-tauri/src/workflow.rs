@@ -274,17 +274,18 @@ pub async fn stop_and_process(app: &AppHandle) -> Result<()> {
             .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
         let initial_destination = wf.destination;
         let stop_target = platform::capture_target_with_session(session_id);
-        let destination_target = if stop_target.hwnd != 0 && !platform::is_flow_window(stop_target.hwnd) {
-            stop_target
-        } else if let Some(dest) = initial_destination {
-            if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
-                dest
+        let destination_target =
+            if stop_target.hwnd != 0 && !platform::is_flow_window(stop_target.hwnd) {
+                stop_target
+            } else if let Some(dest) = initial_destination {
+                if dest.hwnd != 0 && !platform::is_flow_window(dest.hwnd) {
+                    dest
+                } else {
+                    platform::remembered_target().unwrap_or(stop_target)
+                }
             } else {
                 platform::remembered_target().unwrap_or(stop_target)
-            }
-        } else {
-            platform::remembered_target().unwrap_or(stop_target)
-        };
+            };
 
         wf.phase = WorkflowPhase::Stopping;
         wf.destination = Some(destination_target);
@@ -642,16 +643,19 @@ async fn run_pending(
                 let outcome = platform::paste_text(t, &final_text);
                 match outcome {
                     Ok("pasted") => {
-                        state
-                            .database
-                            .update_pending_delivery(pending_id, "shortcut_sent", None)?;
+                        state.database.update_pending_delivery(
+                            pending_id,
+                            "shortcut_sent",
+                            None,
+                        )?;
                         let _ = state.database.delete_pending(pending_id);
                         "Dictation sent to the selected application"
                     }
                     Err(err) => {
                         let msg = format!("Paste delivery failed: {err}");
                         crate::diagnostics::log_event("error", Some(session_id), None, &msg);
-                        let warning = format!("Delivery failed: {err}. Dictation saved for review.");
+                        let warning =
+                            format!("Delivery failed: {err}. Dictation saved for review.");
                         state.database.update_pending_delivery(
                             pending_id,
                             "not_attempted",

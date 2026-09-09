@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{
     error::{FlowError, Result},
-    models::{DictionaryEntry, CLEANUP_MODEL, TRANSCRIPTION_MODEL},
+    models::{DictionaryEntry, CLEANUP_FALLBACK_MODEL, CLEANUP_MODEL, TRANSCRIPTION_MODEL},
 };
 use unicode_categories::UnicodeCategories;
 
@@ -139,10 +139,14 @@ impl GroqClient {
 
         let has_whisper = models.data.iter().any(|m| m.id == TRANSCRIPTION_MODEL);
         let has_qwen = models.data.iter().any(|m| m.id == CLEANUP_MODEL);
+        // The cleanup stage falls back to this model when the primary
+        // cleanup model is rate limited or the service errors, so the key
+        // check must cover it too.
+        let has_fallback = models.data.iter().any(|m| m.id == CLEANUP_FALLBACK_MODEL);
 
-        if !has_whisper || !has_qwen {
+        if !has_whisper || !has_qwen || !has_fallback {
             return Err(FlowError::Message(format!(
-                "Your Groq account does not have access to both required models ({TRANSCRIPTION_MODEL} and {CLEANUP_MODEL})."
+                "Your Groq account does not have access to all required models ({TRANSCRIPTION_MODEL}, {CLEANUP_MODEL}, and {CLEANUP_FALLBACK_MODEL})."
             )));
         }
 
@@ -166,6 +170,9 @@ impl GroqClient {
                 ));
             }
             attempts += 1;
+            // Bound each attempt by the remaining stage budget (see
+            // clean_with_model) so the stage deadline cannot be exceeded.
+            let remaining = stage_deadline.saturating_duration_since(tokio::time::Instant::now());
             let file_part = multipart::Part::bytes(wav.clone())
                 .file_name("dictation.wav")
                 .mime_str("audio/wav")
@@ -186,6 +193,7 @@ impl GroqClient {
                 .post(format!("{}/audio/transcriptions", self.base_url))
                 .bearer_auth(api_key.trim())
                 .multipart(form)
+                .timeout(remaining)
                 .send()
                 .await;
 
@@ -249,7 +257,8 @@ impl GroqClient {
                         }
                     }
 
-                    return Err(map_status_error(status));
+                    let detail = read_error_detail(resp).await;
+                    return Err(map_status_error(status, detail.as_deref()));
                 }
                 Err(e) => {
                     if attempts < 3 && e.is_connect() {
@@ -265,6 +274,9 @@ impl GroqClient {
         }
     }
 
+    /// Cleans a transcript with the primary cleanup model, falling back to
+    /// CLEANUP_FALLBACK_MODEL when the primary hits a rate limit or the Groq
+    /// service returns server errors.
     pub async fn clean(
         &self,
         api_key: &str,
@@ -292,9 +304,64 @@ impl GroqClient {
             corrected_transcript: bounded_corrected,
         })
         .map_err(|e| FlowError::Message(format!("Could not serialize cleanup input: {e}")))?;
+        let filler_only = is_filler_only(raw_transcript) && is_filler_only(corrected_transcript);
 
+        let stage_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+
+        match self
+            .clean_with_model(
+                api_key,
+                CLEANUP_MODEL,
+                &user_content,
+                filler_only,
+                stage_deadline,
+            )
+            .await
+        {
+            Ok(text) => Ok(text),
+            Err(CleanAttemptError::Fatal(error)) => Err(error),
+            Err(CleanAttemptError::Provider(status, detail)) => {
+                let primary_error = map_status_error(status, detail.as_deref());
+                // No time left for the fallback: report the primary failure.
+                // A request needs meaningful time; starting one with less
+                // than a second of stage budget would run past the
+                // 90-second stage deadline even with the per-attempt timeout.
+                if tokio::time::Instant::now() + Duration::from_secs(1) >= stage_deadline {
+                    return Err(primary_error);
+                }
+                match self
+                    .clean_with_model(
+                        api_key,
+                        CLEANUP_FALLBACK_MODEL,
+                        &user_content,
+                        filler_only,
+                        stage_deadline,
+                    )
+                    .await
+                {
+                    Ok(text) => Ok(text),
+                    Err(CleanAttemptError::Fatal(error)) => Err(error),
+                    Err(CleanAttemptError::Provider(fallback_status, fallback_detail)) => {
+                        Err(FlowError::Message(format!(
+                            "{primary_error} The fallback model also failed: {}",
+                            map_status_error(fallback_status, fallback_detail.as_deref())
+                        )))
+                    }
+                }
+            }
+        }
+    }
+
+    async fn clean_with_model(
+        &self,
+        api_key: &str,
+        model: &str,
+        user_content: &str,
+        filler_only: bool,
+        stage_deadline: tokio::time::Instant,
+    ) -> std::result::Result<String, CleanAttemptError> {
         let request_body = json!({
-            "model": CLEANUP_MODEL,
+            "model": model,
             "temperature": 0.1,
             "reasoning_effort": "low",
             "reasoning_format": "hidden",
@@ -306,19 +373,23 @@ impl GroqClient {
             ]
         });
 
-        let stage_deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         let mut attempts = 0;
         loop {
             if tokio::time::Instant::now() >= stage_deadline {
-                return Err(FlowError::Message(
+                return Err(CleanAttemptError::Fatal(FlowError::Message(
                     "Cleanup exceeded 90-second stage deadline.".into(),
-                ));
+                )));
             }
             attempts += 1;
+            // Bound each attempt by the remaining stage budget so a request
+            // started near the deadline cannot run the client's full
+            // 90-second timeout past the stage deadline.
+            let remaining = stage_deadline.saturating_duration_since(tokio::time::Instant::now());
             let send_res = self
                 .client
                 .post(format!("{}/chat/completions", self.base_url))
                 .bearer_auth(api_key.trim())
+                .timeout(remaining)
                 .json(&request_body)
                 .send()
                 .await;
@@ -327,70 +398,72 @@ impl GroqClient {
                 Ok(resp) => {
                     let status = resp.status();
                     if status.is_success() {
-                        let bytes = read_bounded_body(resp, MAX_BODY_BYTES).await?;
+                        let bytes = read_bounded_body(resp, MAX_BODY_BYTES)
+                            .await
+                            .map_err(CleanAttemptError::Fatal)?;
                         let chat: ChatResponse = serde_json::from_slice(&bytes).map_err(|_| {
-                            FlowError::Message("Invalid JSON from cleanup model.".into())
+                            CleanAttemptError::Fatal(FlowError::Message(
+                                "Invalid JSON from cleanup model.".into(),
+                            ))
                         })?;
 
                         if chat.choices.len() != 1 {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup model returned unexpected number of choices.".into(),
-                            ));
+                            )));
                         }
 
                         let choice = &chat.choices[0];
                         if choice.message.refusal.is_some() || choice.message.tool_calls.is_some() {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup request was refused or contained tool calls.".into(),
-                            ));
-                        }
-
-                        if choice.finish_reason.as_deref() != Some("stop") {
-                            return Err(FlowError::Message(format!(
-                                "Cleanup completion was truncated or abnormal (finish_reason: {:?}).",
-                                choice.finish_reason
                             )));
                         }
 
+                        if choice.finish_reason.as_deref() != Some("stop") {
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(format!(
+                                "Cleanup completion was truncated or abnormal (finish_reason: {:?}).",
+                                choice.finish_reason
+                            ))));
+                        }
+
                         let Some(ref content) = choice.message.content else {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup model returned null content.".into(),
-                            ));
+                            )));
                         };
 
                         if content.len() > MAX_TRANSCRIPT_BYTES {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup response exceeded 32,000 bytes limit.".into(),
-                            ));
+                            )));
                         }
 
                         // Check for disallowed control characters: C0 (except \t, \n, \r) and \x7f
                         if content.chars().any(|c| {
                             (c < ' ' && c != '\t' && c != '\n' && c != '\r') || c == '\x7f'
                         }) {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup response contains disallowed control characters.".into(),
-                            ));
+                            )));
                         }
 
                         // Check for leaked reasoning block
                         if content.starts_with("<think>") || content.contains("</think>") {
-                            return Err(FlowError::Message(
+                            return Err(CleanAttemptError::Fatal(FlowError::Message(
                                 "Cleanup response contains leaked reasoning block.".into(),
-                            ));
+                            )));
                         }
 
                         // Validate empty output
                         let trimmed = content.trim();
                         if trimmed.is_empty() {
-                            if is_filler_only(raw_transcript)
-                                && is_filler_only(corrected_transcript)
-                            {
+                            if filler_only {
                                 return Ok(String::new());
                             } else {
-                                return Err(FlowError::Message(
+                                return Err(CleanAttemptError::Fatal(FlowError::Message(
                                     "Model returned empty text for substantive dictation.".into(),
-                                ));
+                                )));
                             }
                         }
 
@@ -406,7 +479,8 @@ impl GroqClient {
                         }
                     }
 
-                    return Err(map_status_error(status));
+                    let detail = read_error_detail(resp).await;
+                    return Err(clean_attempt_failure(status, detail));
                 }
                 Err(e) => {
                     if attempts < 3 && e.is_connect() {
@@ -416,11 +490,88 @@ impl GroqClient {
                             continue;
                         }
                     }
-                    return Err(FlowError::Network(e));
+                    return Err(CleanAttemptError::Fatal(FlowError::Network(e)));
                 }
             }
         }
     }
+}
+
+/// Why a cleanup attempt on a single model stopped. Provider failures (rate
+/// limits, server errors) are retried with the fallback model; everything
+/// else is surfaced directly.
+enum CleanAttemptError {
+    Provider(StatusCode, Option<String>),
+    Fatal(FlowError),
+}
+
+fn clean_attempt_failure(status: StatusCode, detail: Option<String>) -> CleanAttemptError {
+    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        CleanAttemptError::Provider(status, detail)
+    } else {
+        CleanAttemptError::Fatal(map_status_error(status, detail.as_deref()))
+    }
+}
+
+fn parse_error_detail(body: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        #[serde(default)]
+        error: Option<ErrorDetail>,
+    }
+    #[derive(Deserialize)]
+    struct ErrorDetail {
+        #[serde(default)]
+        code: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+    }
+
+    let parsed = serde_json::from_str::<ErrorBody>(body).ok()?;
+    let detail = parsed.error?;
+    // PLAN F17: provider response prose must never reach error strings. Only
+    // allowlisted metadata (safe code, request ID) is extracted; the message
+    // field and any raw body are discarded because they are provider-
+    // controlled text that could echo request or transcript content into the
+    // diagnostic log and the UI.
+    let mut parts = Vec::new();
+    if let Some(code) = detail.code {
+        parts.push(code);
+    }
+    if let Some(request_id) = detail.request_id {
+        parts.push(request_id);
+    }
+    let joined = parts.join(": ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined.chars().take(300).collect())
+    }
+}
+
+/// Reads a bounded slice of an error response body and extracts only
+/// allowlisted metadata (safe code, request ID). Provider message text and
+/// raw body content are deliberately discarded so neither the UI nor the
+/// diagnostic log can capture response or transcript content.
+async fn read_error_detail(mut resp: reqwest::Response) -> Option<String> {
+    const MAX_ERROR_BODY_BYTES: usize = 2048;
+
+    let mut bytes = Vec::new();
+    while bytes.len() < MAX_ERROR_BODY_BYTES {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => {
+                let take = chunk.len().min(MAX_ERROR_BODY_BYTES - bytes.len());
+                bytes.extend_from_slice(&chunk[..take]);
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    if bytes.is_empty() {
+        return None;
+    }
+    let body = String::from_utf8_lossy(&bytes);
+    parse_error_detail(&body)
 }
 
 pub fn build_whisper_guidance(entries: &[DictionaryEntry]) -> String {
@@ -505,8 +656,8 @@ fn get_retry_delay(resp: &reqwest::Response, attempt: usize) -> Option<Duration>
     Some(Duration::from_millis(base_ms + jitter))
 }
 
-fn map_status_error(status: StatusCode) -> FlowError {
-    match status {
+fn map_status_error(status: StatusCode, detail: Option<&str>) -> FlowError {
+    let base = match status {
         StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
             // Same invalid-key error and wording as test_key so transcription
             // and cleanup failures read identically to the key check.
@@ -525,6 +676,12 @@ fn map_status_error(status: StatusCode) -> FlowError {
             FlowError::Message("Groq service is temporarily unavailable.".into())
         }
         other => FlowError::Message(format!("Groq API error: {other}")),
+    };
+    match detail {
+        Some(detail) if !detail.trim().is_empty() => {
+            FlowError::Message(format!("{base} ({detail})"))
+        }
+        _ => base,
     }
 }
 
@@ -573,5 +730,64 @@ mod tests {
         let guidance = build_whisper_guidance(&entries);
         assert_eq!(guidance, "by the way, Flow");
         assert!(guidance.len() <= MAX_GUIDANCE_BYTES);
+    }
+
+    #[test]
+    fn test_parse_error_detail_extracts_only_allowlisted_fields() {
+        let body = r#"{"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` on tokens per day (TPD): Limit 200000, Used 199000, Requested 16384.","type":"requests","code":"rate_limit_exceeded","request_id":"req_01abc"}}"#;
+        let detail = parse_error_detail(body).unwrap();
+        assert_eq!(detail, "rate_limit_exceeded: req_01abc");
+        // Provider message prose must never be echoed into error strings.
+        assert!(!detail.contains("Rate limit reached"));
+    }
+
+    #[test]
+    fn test_parse_error_detail_requires_allowlisted_fields() {
+        // Without a safe code or request ID there is no detail: raw body or
+        // message text must never fall back into the error string.
+        let body = r#"{"error":{"message":"provider message that may echo transcript content"}}"#;
+        assert!(parse_error_detail(body).is_none());
+    }
+
+    #[test]
+    fn test_parse_error_detail_ignores_non_json_and_empty() {
+        assert!(parse_error_detail("not json").is_none());
+        assert!(parse_error_detail("{\"error\":{}}").is_none());
+        assert!(parse_error_detail("").is_none());
+    }
+
+    #[test]
+    fn test_map_status_error_appends_provider_detail() {
+        let base = map_status_error(StatusCode::TOO_MANY_REQUESTS, None).to_string();
+        assert_eq!(
+            base,
+            "Groq rate limit reached. Please wait a moment and try again."
+        );
+        let with_detail = map_status_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            Some(
+                "rate_limit_exceeded: Rate limit reached for model `qwen/qwen3.8-27b` on tokens per day (TPD).",
+            ),
+        )
+        .to_string();
+        assert!(with_detail
+            .starts_with("Groq rate limit reached. Please wait a moment and try again. ("));
+        assert!(with_detail.contains("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn test_clean_attempt_failure_classifies_provider_errors() {
+        assert!(matches!(
+            clean_attempt_failure(StatusCode::TOO_MANY_REQUESTS, None),
+            CleanAttemptError::Provider(_, _)
+        ));
+        assert!(matches!(
+            clean_attempt_failure(StatusCode::BAD_GATEWAY, None),
+            CleanAttemptError::Provider(_, _)
+        ));
+        assert!(matches!(
+            clean_attempt_failure(StatusCode::UNAUTHORIZED, None),
+            CleanAttemptError::Fatal(FlowError::Message(_))
+        ));
     }
 }

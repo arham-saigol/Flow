@@ -134,8 +134,9 @@ fn redact_secret_tokens(
     let mut cursor = 0;
     while let Some(match_start) = find_case_insensitive(msg, needle, cursor) {
         out.push_str(&msg[cursor..match_start + keep_prefix]);
-        let token_end = (match_start + needle.len() + token_len(&msg[match_start + needle.len()..]))
-            .min(msg.len());
+        let token_end =
+            (match_start + needle.len() + token_len(&msg[match_start + needle.len()..]))
+                .min(msg.len());
         out.push_str("[REDACTED]");
         cursor = token_end;
     }
@@ -164,7 +165,10 @@ mod tests {
 
     #[test]
     fn ordinary_words_are_not_redacted() {
-        assert_eq!(sanitize_message("hotkey captured: keyboard F12"), "hotkey captured: keyboard F12");
+        assert_eq!(
+            sanitize_message("hotkey captured: keyboard F12"),
+            "hotkey captured: keyboard F12"
+        );
     }
 
     #[test]

@@ -260,6 +260,8 @@ impl Database {
                 }
             }
 
+            Self::recompute_dictionary_conflicts(&tx)?;
+
             // F16: Group existing snippets by normalized trigger
             let mut snip_stmt = tx.prepare("SELECT id, trigger FROM snippets")?;
             let snip_rows: Vec<(i64, String)> = snip_stmt
@@ -1523,13 +1525,13 @@ fn normalized_correction_source_exists(
         .collect::<std::result::Result<Vec<_>, _>>()?;
     // A source is only taken when another entry shares its normalized source
     // with a different replacement; an identical replacement is the same rule.
-    Ok(entries.into_iter().any(
-        |(id, existing, existing_replacement)| {
+    Ok(entries
+        .into_iter()
+        .any(|(id, existing, existing_replacement)| {
             Some(id) != excluded_id
                 && text::normalize_correction_source(&existing) == normalized
                 && existing_replacement != replacement
-        },
-    ))
+        }))
 }
 
 fn map_unique_violation(error: rusqlite::Error, message: &str) -> FlowError {
@@ -1628,6 +1630,57 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(user_ver, 2);
+
+        drop(database);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn opening_an_existing_database_migrates_dictionary_conflicts_using_replacements() {
+        let path = database_path("dictionary-migration-conflicts");
+        let legacy = Connection::open(&path).unwrap();
+        legacy
+            .execute_batch(
+                "
+                CREATE TABLE dictionary (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    value TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    correction TEXT,
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO dictionary(value, correction, created_at) VALUES('four word', 'Forward', 1);
+                INSERT INTO dictionary(value, correction, created_at) VALUES('four   word', 'Forward', 2);
+                INSERT INTO dictionary(value, correction, created_at) VALUES('teh', 'the', 3);
+                INSERT INTO dictionary(value, correction, created_at) VALUES('teh  ', 'that', 4);
+                ",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let database = Database::open(&path).unwrap();
+        let entries = database.dictionary().unwrap();
+
+        let forward_entries: Vec<_> = entries
+            .iter()
+            .filter(|e| e.correction.as_deref() == Some("Forward"))
+            .collect();
+        assert_eq!(forward_entries.len(), 2);
+        assert!(forward_entries.iter().all(|e| e.enabled));
+        assert!(forward_entries.iter().all(|e| e.conflict_reason.is_none()));
+
+        let teh_the = entries.iter().find(|e| e.value == "teh").unwrap();
+        assert!(!teh_the.enabled);
+        assert_eq!(
+            teh_the.conflict_reason.as_deref(),
+            Some("normalized_source_conflict")
+        );
+
+        let teh_that = entries.iter().find(|e| e.value == "teh  ").unwrap();
+        assert!(!teh_that.enabled);
+        assert_eq!(
+            teh_that.conflict_reason.as_deref(),
+            Some("normalized_source_conflict")
+        );
 
         drop(database);
         let _ = std::fs::remove_file(path);
