@@ -56,9 +56,9 @@ describe("Frontend Modal Components", () => {
 describe("Overlay Component", () => {
   it("renders recording waveform with accessible label without escape instruction", () => {
     render(<Overlay />);
-    const waveform = screen.getByLabelText("Recording");
+    const waveform = screen.getByRole("img", { name: "Recording" });
     expect(waveform).toBeInTheDocument();
     expect(waveform).toHaveClass("waveform");
-    expect(screen.queryByLabelText(/Press Escape to cancel/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: /Press Escape to cancel/i })).not.toBeInTheDocument();
   });
 });

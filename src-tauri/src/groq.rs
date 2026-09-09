@@ -166,6 +166,9 @@ impl GroqClient {
                 ));
             }
             attempts += 1;
+            // Bound each attempt by the remaining stage budget (see
+            // clean_with_model) so the stage deadline cannot be exceeded.
+            let remaining = stage_deadline.saturating_duration_since(tokio::time::Instant::now());
             let file_part = multipart::Part::bytes(wav.clone())
                 .file_name("dictation.wav")
                 .mime_str("audio/wav")
@@ -186,6 +189,7 @@ impl GroqClient {
                 .post(format!("{}/audio/transcriptions", self.base_url))
                 .bearer_auth(api_key.trim())
                 .multipart(form)
+                .timeout(remaining)
                 .send()
                 .await;
 
@@ -315,7 +319,10 @@ impl GroqClient {
             Err(CleanAttemptError::Provider(status, detail)) => {
                 let primary_error = map_status_error(status, detail.as_deref());
                 // No time left for the fallback: report the primary failure.
-                if tokio::time::Instant::now() >= stage_deadline {
+                // A request needs meaningful time; starting one with less
+                // than a second of stage budget would run past the
+                // 90-second stage deadline even with the per-attempt timeout.
+                if tokio::time::Instant::now() + Duration::from_secs(1) >= stage_deadline {
                     return Err(primary_error);
                 }
                 match self
@@ -370,10 +377,15 @@ impl GroqClient {
                 )));
             }
             attempts += 1;
+            // Bound each attempt by the remaining stage budget so a request
+            // started near the deadline cannot run the client's full
+            // 90-second timeout past the stage deadline.
+            let remaining = stage_deadline.saturating_duration_since(tokio::time::Instant::now());
             let send_res = self
                 .client
                 .post(format!("{}/chat/completions", self.base_url))
                 .bearer_auth(api_key.trim())
+                .timeout(remaining)
                 .json(&request_body)
                 .send()
                 .await;
@@ -508,17 +520,22 @@ fn parse_error_detail(body: &str) -> Option<String> {
         #[serde(default)]
         code: Option<String>,
         #[serde(default)]
-        message: Option<String>,
+        request_id: Option<String>,
     }
 
     let parsed = serde_json::from_str::<ErrorBody>(body).ok()?;
     let detail = parsed.error?;
+    // PLAN F17: provider response prose must never reach error strings. Only
+    // allowlisted metadata (safe code, request ID) is extracted; the message
+    // field and any raw body are discarded because they are provider-
+    // controlled text that could echo request or transcript content into the
+    // diagnostic log and the UI.
     let mut parts = Vec::new();
     if let Some(code) = detail.code {
         parts.push(code);
     }
-    if let Some(message) = detail.message {
-        parts.push(message);
+    if let Some(request_id) = detail.request_id {
+        parts.push(request_id);
     }
     let joined = parts.join(": ");
     if joined.is_empty() {
@@ -528,8 +545,10 @@ fn parse_error_detail(body: &str) -> Option<String> {
     }
 }
 
-/// Reads a bounded slice of an error response body and extracts the provider
-/// error code and message so failures say which model and limit tripped.
+/// Reads a bounded slice of an error response body and extracts only
+/// allowlisted metadata (safe code, request ID). Provider message text and
+/// raw body content are deliberately discarded so neither the UI nor the
+/// diagnostic log can capture response or transcript content.
 async fn read_error_detail(mut resp: reqwest::Response) -> Option<String> {
     const MAX_ERROR_BODY_BYTES: usize = 2048;
 
@@ -549,7 +568,6 @@ async fn read_error_detail(mut resp: reqwest::Response) -> Option<String> {
     }
     let body = String::from_utf8_lossy(&bytes);
     parse_error_detail(&body)
-        .or_else(|| (!body.trim().is_empty()).then(|| body.trim().chars().take(300).collect()))
 }
 
 pub fn build_whisper_guidance(entries: &[DictionaryEntry]) -> String {
@@ -711,11 +729,20 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_error_detail_extracts_code_and_message() {
-        let body = r#"{"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` on tokens per day (TPD): Limit 200000, Used 199000, Requested 16384.","type":"requests","code":"rate_limit_exceeded"}}"#;
+    fn test_parse_error_detail_extracts_only_allowlisted_fields() {
+        let body = r#"{"error":{"message":"Rate limit reached for model `qwen/qwen3.8-27b` on tokens per day (TPD): Limit 200000, Used 199000, Requested 16384.","type":"requests","code":"rate_limit_exceeded","request_id":"req_01abc"}}"#;
         let detail = parse_error_detail(body).unwrap();
-        assert!(detail.starts_with("rate_limit_exceeded: Rate limit reached for model"));
-        assert!(detail.contains("tokens per day"));
+        assert_eq!(detail, "rate_limit_exceeded: req_01abc");
+        // Provider message prose must never be echoed into error strings.
+        assert!(!detail.contains("Rate limit reached"));
+    }
+
+    #[test]
+    fn test_parse_error_detail_requires_allowlisted_fields() {
+        // Without a safe code or request ID there is no detail: raw body or
+        // message text must never fall back into the error string.
+        let body = r#"{"error":{"message":"provider message that may echo transcript content"}}"#;
+        assert!(parse_error_detail(body).is_none());
     }
 
     #[test]
