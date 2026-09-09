@@ -269,9 +269,7 @@ fn save_settings(
     if let Err(error) = tray.set_tooltip(Some(&tooltip)) {
         let revert_result = revert_autostart_and_tooltip(&autostart, &tray, &previous);
         return Err(match revert_result {
-            Ok(()) => {
-                FlowError::Message(format!("Could not update the system tray: {error}"))
-            }
+            Ok(()) => FlowError::Message(format!("Could not update the system tray: {error}")),
             Err(revert_err) => FlowError::PartialSettingsSave(format!(
                 "Could not update the system tray: {error}; {revert_err}."
             )),
@@ -286,9 +284,9 @@ fn save_settings(
             let revert_result = revert_autostart_and_tooltip(&autostart, &tray, &previous);
             return Err(match revert_result {
                 Ok(()) => error,
-                Err(revert_err) => FlowError::PartialSettingsSave(format!(
-                    "{error}; {revert_err}."
-                )),
+                Err(revert_err) => {
+                    FlowError::PartialSettingsSave(format!("{error}; {revert_err}."))
+                }
             });
         }
     }
@@ -569,10 +567,8 @@ pub fn run() {
                     // Read the active pending ID so active-item exclusion stays
                     // enabled, then run the synchronous database cleanup on a
                     // blocking thread so the async runtime is never blocked.
-                    let active_pending_id = app_handle
-                        .state::<AppState>()
-                        .workflow
-                        .active_pending_id();
+                    let active_pending_id =
+                        app_handle.state::<AppState>().workflow.active_pending_id();
                     let blocker = app_handle.clone();
                     let _ = tauri::async_runtime::spawn_blocking(move || {
                         let state = blocker.state::<AppState>();

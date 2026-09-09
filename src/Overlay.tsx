@@ -155,7 +155,7 @@ export default function Overlay() {
       className={`overlay-bar overlay-bar--${state.phase}${isClosing ? " overlay-bar--closing" : ""}`}
     >
       {state.phase === "recording" ? (
-        <div className="waveform" aria-label="Recording. Press Escape to cancel.">
+        <div className="waveform" aria-label="Recording">
           {waveformProfile.map((weight, index) => (
             <i
               key={index}

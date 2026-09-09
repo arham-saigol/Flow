@@ -4,7 +4,12 @@ import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import { HistoryDetail } from "../src/components/HistoryDetail";
 import { PrivacyNoticeModal } from "../src/components/PrivacyNoticeModal";
+import Overlay from "../src/Overlay";
 import type { HistoryEntry } from "../src/types";
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
 
 describe("Frontend Modal Components", () => {
   it("renders HistoryDetail with raw and polished text and metadata", () => {
@@ -45,5 +50,15 @@ describe("Frontend Modal Components", () => {
     await user.click(acceptButton);
 
     expect(onAccept).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Overlay Component", () => {
+  it("renders recording waveform with accessible label without escape instruction", () => {
+    render(<Overlay />);
+    const waveform = screen.getByLabelText("Recording");
+    expect(waveform).toBeInTheDocument();
+    expect(waveform).toHaveClass("waveform");
+    expect(screen.queryByLabelText(/Press Escape to cancel/i)).not.toBeInTheDocument();
   });
 });
