@@ -139,10 +139,14 @@ impl GroqClient {
 
         let has_whisper = models.data.iter().any(|m| m.id == TRANSCRIPTION_MODEL);
         let has_qwen = models.data.iter().any(|m| m.id == CLEANUP_MODEL);
+        // The cleanup stage falls back to this model when the primary
+        // cleanup model is rate limited or the service errors, so the key
+        // check must cover it too.
+        let has_fallback = models.data.iter().any(|m| m.id == CLEANUP_FALLBACK_MODEL);
 
-        if !has_whisper || !has_qwen {
+        if !has_whisper || !has_qwen || !has_fallback {
             return Err(FlowError::Message(format!(
-                "Your Groq account does not have access to both required models ({TRANSCRIPTION_MODEL} and {CLEANUP_MODEL})."
+                "Your Groq account does not have access to all required models ({TRANSCRIPTION_MODEL}, {CLEANUP_MODEL}, and {CLEANUP_FALLBACK_MODEL})."
             )));
         }
 

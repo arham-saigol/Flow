@@ -10,7 +10,7 @@ use std::{
 
 use tauri::{AppHandle, Emitter, Manager};
 use windows::{
-    core::PCWSTR,
+    core::{w, PCWSTR},
     Win32::{
         Foundation::{
             CloseHandle, GetLastError, GlobalFree, SetLastError, ERROR_SUCCESS, HGLOBAL, HINSTANCE,
@@ -19,7 +19,7 @@ use windows::{
         System::{
             DataExchange::{
                 CloseClipboard, EmptyClipboard, GetClipboardOwner, GetClipboardSequenceNumber,
-                GetOpenClipboardWindow, OpenClipboard, SetClipboardData,
+                GetOpenClipboardWindow, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
             },
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -531,7 +531,7 @@ pub fn copy_text(text: &str) -> Result<()> {
     let _operation = CLIPBOARD_OPERATION
         .lock()
         .map_err(|_| FlowError::Windows("The clipboard handler is unavailable.".into()))?;
-    unsafe { write_clipboard_text(text) }
+    unsafe { write_clipboard_text(text, false) }
 }
 
 fn clipboard_owner() -> Result<HWND> {
@@ -542,7 +542,7 @@ fn clipboard_owner() -> Result<HWND> {
         .ok_or_else(|| FlowError::Windows("The clipboard owner window is unavailable.".into()))
 }
 
-unsafe fn write_clipboard_text(text: &str) -> Result<()> {
+unsafe fn write_clipboard_text(text: &str, exclude_from_services: bool) -> Result<()> {
     let wide = encode_clipboard_text(text);
     let allocation = allocate_clipboard_wide(&wide)?;
     if let Err(error) =
@@ -561,6 +561,11 @@ unsafe fn write_clipboard_text(text: &str) -> Result<()> {
     if let Err(error) = set_clipboard_wide(allocation) {
         let _ = CloseClipboard();
         return Err(error);
+    }
+    if exclude_from_services {
+        // Manually copied dictation should not silently land in clipboard
+        // history or cloud sync either.
+        exclude_from_clipboard_services();
     }
     let _ = CloseClipboard();
     Ok(())
@@ -714,7 +719,11 @@ fn paste_via_clipboard(target: HWND, text: &str) -> Result<()> {
                 EmptyClipboard().map_err(|error| {
                     FlowError::Windows(format!("Could not clear the clipboard: {error}"))
                 })?;
-                set_delayed_clipboard_text()
+                set_delayed_clipboard_text()?;
+                // Keep the temporary dictation out of clipboard history and
+                // cloud sync while it waits for the destination.
+                exclude_from_clipboard_services();
+                Ok(())
             })();
             let _ = CloseClipboard();
             result
@@ -879,6 +888,44 @@ unsafe fn write_clipboard_wide(wide: &[u16]) -> Result<()> {
     set_clipboard_wide(allocation)
 }
 
+unsafe fn write_clipboard_dword(format: u32, value: u32) -> Result<()> {
+    let allocation = GlobalAlloc(GMEM_MOVEABLE, size_of::<u32>()).map_err(|error| {
+        FlowError::Windows(format!("Could not allocate clipboard metadata: {error}"))
+    })?;
+    let pointer = GlobalLock(allocation).cast::<u32>();
+    if pointer.is_null() {
+        let _ = GlobalFree(allocation);
+        return Err(FlowError::Windows(
+            "Could not access clipboard metadata.".into(),
+        ));
+    }
+    pointer.write(value);
+    let _ = GlobalUnlock(allocation);
+    if let Err(error) = SetClipboardData(format, windows::Win32::Foundation::HANDLE(allocation.0)) {
+        let _ = GlobalFree(allocation);
+        return Err(FlowError::Windows(format!(
+            "Could not write clipboard metadata: {error}"
+        )));
+    }
+    Ok(())
+}
+
+unsafe fn exclude_from_clipboard_services() {
+    // These markers are best effort so a platform that rejects one still
+    // pastes; they keep the dictation out of clipboard history and cloud
+    // sync while it is on the clipboard.
+    for name in [
+        w!("CanIncludeInClipboardHistory"),
+        w!("CanUploadToCloudClipboard"),
+        w!("ExcludeClipboardContentFromMonitorProcessing"),
+    ] {
+        let format = RegisterClipboardFormatW(name);
+        if format != 0 {
+            let _ = write_clipboard_dword(format, 0);
+        }
+    }
+}
+
 unsafe fn ensure_clipboard_render_handler(owner: HWND) -> Result<()> {
     if CLIPBOARD_RENDER_HANDLER_INSTALLED.load(Ordering::Acquire) {
         return Ok(());
@@ -915,18 +962,21 @@ unsafe extern "system" fn clipboard_window_proc(
     if message == WM_RENDERFORMAT && wparam.0 as u32 == CF_UNICODETEXT {
         if let Ok(mut guard) = CLIPBOARD_RENDER_STATE.lock() {
             if let Some(state) = guard.as_mut() {
-                let requested_by_target = match GetOpenClipboardWindow() {
-                    Ok(requester) => {
+                let foreground_is_target = GetForegroundWindow().0 as isize == state.target_hwnd;
+                let requester_process_id = match GetOpenClipboardWindow() {
+                    Ok(requester) if !requester.0.is_null() => {
                         let mut requester_process_id = 0;
-                        state.shortcut_sent
-                            && GetWindowThreadProcessId(requester, Some(&mut requester_process_id))
-                                != 0
-                            && state.target_process_ids.contains(&requester_process_id)
+                        (GetWindowThreadProcessId(requester, Some(&mut requester_process_id)) != 0)
+                            .then_some(requester_process_id)
                     }
-                    Err(_) => {
-                        state.shortcut_sent && GetForegroundWindow().0 as isize == state.target_hwnd
-                    }
+                    _ => None,
                 };
+                let requested_by_target = render_request_allowed(
+                    state.shortcut_sent,
+                    requester_process_id,
+                    foreground_is_target,
+                    &state.target_process_ids,
+                );
                 if !requested_by_target {
                     // Keep the format delayed when a clipboard monitor asks
                     // first; only the dictation target may materialize the
@@ -941,6 +991,32 @@ unsafe extern "system" fn clipboard_window_proc(
         return LRESULT(0);
     }
     DefSubclassProc(hwnd, message, wparam, lparam)
+}
+
+/// Decides whether a WM_RENDERFORMAT request may materialize the temporary
+/// dictation text and counts as consumption by the destination.
+fn render_request_allowed(
+    shortcut_sent: bool,
+    requester_process_id: Option<u32>,
+    foreground_is_target: bool,
+    target_process_ids: &[u32],
+) -> bool {
+    // Before the paste shortcut is dispatched, every requester is denied:
+    // clipboard monitors react to the clipboard change and must not capture
+    // the dictation.
+    if !shortcut_sent {
+        return false;
+    }
+    match requester_process_id {
+        Some(requester_process_id) => {
+            target_process_ids.contains(&requester_process_id) || foreground_is_target
+        }
+        // Chromium-style apps open the clipboard without an owner window and
+        // remote-desktop or brokered targets paste through a process outside
+        // the captured family; reject only when the dictation target is not
+        // foreground.
+        None => foreground_is_target,
+    }
 }
 
 unsafe fn send_armed_paste_shortcut() -> Result<()> {
@@ -1214,7 +1290,7 @@ fn key_input(key: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 
 #[cfg(test)]
 mod tests {
-    use super::{descendant_process_ids, encode_clipboard_text};
+    use super::{descendant_process_ids, encode_clipboard_text, render_request_allowed};
 
     #[test]
     fn clipboard_text_uses_cr_lf_line_endings() {
@@ -1232,5 +1308,28 @@ mod tests {
         let processes = [(10, 1), (11, 10), (12, 11), (20, 1), (21, 20)];
 
         assert_eq!(descendant_process_ids(10, &processes), vec![10, 11, 12]);
+    }
+
+    #[test]
+    fn render_requests_accept_target_family_and_foreground_fallback() {
+        let family = [10u32, 11, 12];
+
+        // Before the shortcut is dispatched every requester is denied, so
+        // clipboard monitors cannot materialize the temporary text.
+        assert!(!render_request_allowed(false, Some(10), true, &family));
+        assert!(!render_request_allowed(false, None, true, &family));
+
+        // Captured family members are accepted after dispatch.
+        assert!(render_request_allowed(true, Some(11), false, &family));
+
+        // Chromium-style NULL-owner readers and brokered or remote-desktop
+        // pastes outside the family are accepted while the dictation target
+        // is foreground; this is what made destinations paste nothing before.
+        assert!(render_request_allowed(true, None, true, &family));
+        assert!(render_request_allowed(true, Some(99), true, &family));
+
+        // Unrelated owners are denied while the target is not foreground.
+        assert!(!render_request_allowed(true, Some(99), false, &family));
+        assert!(!render_request_allowed(true, None, false, &family));
     }
 }
