@@ -8,6 +8,8 @@ pub const MAX_SNIPPET_CONTENT_CHARS: usize = 4_000;
 pub const MAX_SNIPPETS: usize = 1_000;
 pub const TRANSCRIPTION_MODEL: &str = "whisper-large-v3";
 pub const CLEANUP_MODEL: &str = "qwen/qwen3.8-27b";
+/// Used when the primary cleanup model is rate limited or unavailable.
+pub const CLEANUP_FALLBACK_MODEL: &str = "openai/gpt-oss-120b";
 pub const RECOVERY_RETENTION_DAYS: u32 = 7;
 pub const MAX_RECOVERY_ITEMS: usize = 100;
 pub const MAX_RECOVERY_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
